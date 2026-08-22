@@ -1,0 +1,7 @@
+# Sürümler kurulu ve doğrulanmış sürümlerle sınırlandı (gerçek para öncesi tekrarlanabilir ortam)
+python-telegram-bot[ext]>=20.0,<23
+yfinance>=0.2.0,<2
+ccxt>=4.0.0,<5
+pandas>=2.0.0,<3
+APScheduler>=3.10.0,<4
+python-dotenv>=1.0.0,<2

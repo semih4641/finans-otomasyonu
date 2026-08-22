@@ -1,0 +1,13 @@
+# Sırlar
+.env
+
+# Loglar ve çalışma zamanı çıktıları
+*.log
+*.pid
+signal_state.json
+backtest_out/
+graphify-out/
+
+# Python
+__pycache__/
+*.pyc

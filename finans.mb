@@ -1,0 +1,12 @@
+"Sen uzman bir Python ve Backend geliştiricisisin. Benim için hisse senedi, temettü ve kripto para takibi yapan, teknik indikatörleri hesaplayan asenkron bir Telegram botu kodlamanı istiyorum. Lütfen python-telegram-bot (v20+), yfinance, ccxt, pandas ve apscheduler kütüphanelerini kullanarak aşağıdaki 10 adımı eksiksiz uygulayan tam bir Python kodu yaz:
+
+1. Kütüphane ve Ortam Kurulumu: Gerekli tüm import işlemlerini yap ve Telegram BOT_TOKEN bilgisini .env dosyasından okuyacak temel konfigürasyonu ayarla.
+2. Kripto Verisi Çekme Fonksiyonu: ccxt kütüphanesini kullanarak Binance üzerinden istenilen bir paritenin (örneğin DOT/USDT) anlık fiyatını ve son 100 mumluk OHLCV (Açılış, Kapanış, Yüksek, Düşük, Hacim) verisini çeken asenkron bir fonksiyon yaz.
+3. Hisse ve Temettü Verisi Fonksiyonu: yfinance kullanarak belirtilen bir hissenin (örneğin AAPL veya THYAO.IS) anlık fiyatını, 1 yıllık geçmiş verisini ve yaklaşan temettü tarihlerini/verimini çeken bir fonksiyon yaz.
+4. İndikatör Hesaplama Motoru: Çekilen geçmiş fiyat verilerini (Pandas DataFrame) kullanarak 14 günlük RSI ve standart MACD hesaplayan modüler bir fonksiyon oluştur.
+5. Başlangıç ve Menü Komutları (/start, /help): Kullanıcı bota girdiğinde onu karşılayan, botun neler yapabildiğini anlatan ve kullanılabilecek komutları listeleyen temel asenkron Telegram mesaj yöneticilerini yaz.
+6. Kripto ve Hisse Sorgu Komutları (/kripto, /hisse): Kullanıcının /kripto DOT veya /hisse AAPL yazdığında ilgili varlığın anlık fiyatını, RSI ve MACD değerlerini formatlı bir metin olarak geri döndüren komut işleyicilerini (command handlers) ekle.
+7. Temettü Sorgu Komutu (/temettu): Kullanıcı /temettu AAPL yazdığında, şirketin yaklaşan veya son dağıttığı temettü bilgilerini listeleyen özel bir komut oluştur.
+8. Arka Plan Zamanlayıcısı (Scheduler): apscheduler (AsyncIOScheduler) kullanarak, belirlediğim varlıkları her 15 dakikada bir kontrol edecek sonsuz bir döngü mekanizması kur.
+9. Otomatik Uyarı Mekanizması: Zamanlayıcının içinde çalışan algoritmaya şu mantığı ekle: Eğer belirlediğim bir coinin RSI değeri 30'un altındaysa (Aşırı Satım) veya hissenin temettü tarihi 1 hafta içindeyse, bot bana otomatik olarak bir uyarı mesajı atsın.
+10. Ana Çalıştırma Döngüsü ve Loglama: Tüm bot uygulamasını ayağa kaldıran main() fonksiyonunu yaz, asyncio.run() ile başlat ve hataları yakalayabilmem için temel logging yapılandırmasını koda dahil et."
