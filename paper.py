@@ -76,10 +76,11 @@ def record_signals(items: list) -> int:
             "opened_at": now_iso,
             "entry": float(entry),
             "tp1": float(it["tp1"]),
-            "tp2": float(it["tp2"]),
+            "tp2": float(it.get("tp2") or it["tp1"]),
             "sl": float(it["sl"]),
-            "score": it.get("score"),
-            "trend": it.get("trend", ""),
+            # item alanları Türkçe adlandırılmıştı (skor/rejim) — uyumlu oku
+            "score": it.get("score", it.get("skor")),
+            "trend": it.get("trend", it.get("rejim", "")),
             "rr": it.get("rr"),
             "categories": "|".join(it.get("signals", [])),
         })

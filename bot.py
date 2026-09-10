@@ -30,6 +30,7 @@ from telegram.ext import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from risk import calculate_position_risk, format_position_risk
 
 # .env dosyasından konfigürasyonu yükle
 load_dotenv()
@@ -504,34 +505,9 @@ def _min_score(market: str, trend: str) -> int:
     return MIN_SIGNAL_SCORE_BEAR if trend == "AYI" else MIN_SIGNAL_SCORE
 
 
-# İşlem başına riske atılacak sermayenin yüzdesi (pozisyon boyutu önerisi)
-POSITION_RISK_PCT = 1.0
-ACCOUNT_SIZE_ENV = "ACCOUNT_SIZE"
-
-
 def sizing_hint(entry: float, sl: float) -> str:
-    """
-    Riske dayalı pozisyon boyutu önerisi.
-    .env içinde ACCOUNT_SIZE tanımlıysa 'sermayenin %X'i kadar risk' kuralına
-    göre alınabilecek miktarı döndürür; tanımlı değilse boş string döner.
-    """
-    raw = os.getenv(ACCOUNT_SIZE_ENV)
-    if not raw:
-        return ""
-    try:
-        account = float(raw)
-    except ValueError:
-        return ""
-    risk_per_unit = entry - sl
-    if risk_per_unit <= 0 or account <= 0:
-        return ""
-    budget = account * (POSITION_RISK_PCT / 100.0)
-    qty = budget / risk_per_unit
-    notional = qty * entry
-    return (
-        f"  ⚖️ Boyut önerisi: ~{qty:,.4g} birim "
-        f"(≈{notional:,.2f} değerinde; %{POSITION_RISK_PCT:g} risk bütçesi)\n"
-    )
+    """Return risk-only sizing information; never place an order."""
+    return format_position_risk(calculate_position_risk(entry, sl))
 
 
 def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
@@ -1331,6 +1307,7 @@ async def scheduled_check(app: Application) -> None:
                 continue
 
             rsi = calculate_rsi(data["ohlcv_df"])
+            risk_result = calculate_position_risk(data["price"], sig_result["sl"])
             buy_signal_items.append({
                 "name": f"🪙 {symbol}",
                 "key": f"kripto:{symbol}",
@@ -1346,6 +1323,7 @@ async def scheduled_check(app: Application) -> None:
                 "sl": sig_result["sl"],
                 "tp1": sig_result["tp1"],
                 "tp2": sig_result["tp2"],
+                "risk": risk_result.as_dict(),
             })
             pending_cooldown.append((f"kripto:{symbol}", signals))
         except Exception as e:
@@ -1366,6 +1344,9 @@ async def scheduled_check(app: Application) -> None:
 
             name = stock_data["info"].get("shortName", actual_ticker)
             rsi = calculate_rsi(stock_data["history_df"])
+            risk_result = calculate_position_risk(
+                stock_data["price"], sig_result["sl"]
+            )
             buy_signal_items.append({
                 "name": f"📈 {name} ({actual_ticker})",
                 "key": f"hisse:{actual_ticker}",
@@ -1381,6 +1362,7 @@ async def scheduled_check(app: Application) -> None:
                 "sl": sig_result["sl"],
                 "tp1": sig_result["tp1"],
                 "tp2": sig_result["tp2"],
+                "risk": risk_result.as_dict(),
             })
             pending_cooldown.append((f"hisse:{actual_ticker}", signals))
         except Exception as e:

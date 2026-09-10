@@ -116,7 +116,8 @@ def load_crypto(pair: str, limit: int = 1000) -> pd.DataFrame | None:
 def walk_forward(df: pd.DataFrame, cooldown_bars: int, market: str = "stock") -> list:
     """
     Geçmişi bar bar tarar; canlıdakiyle birebir mantıkla sinyal üretir.
-    Dönen her olay: karar barı, giriş fiyatı, TP/SL ve meta alanları taşır.
+    Dönen her olay: karar barı, karar sonrası ilk bar açılışından giriş fiyatı,
+    TP/SL ve meta alanları taşır. Açılış sütunu yoksa kapanış fiyatı kullanılır.
     """
     events = []
     last_fire: dict = {}  # kategori -> son karar barı
@@ -137,9 +138,18 @@ def walk_forward(df: pd.DataFrame, cooldown_bars: int, market: str = "stock") ->
         for c in cats:
             last_fire[c] = decision_idx
 
+        entry_idx = decision_idx + 1
+        if "open" in df.columns and pd.notna(df["open"].iloc[entry_idx]):
+            entry_price = float(df["open"].iloc[entry_idx])
+        else:
+            # Bazı veri kaynakları OHLC içinde open sağlamaz; eski close
+            # davranışı (karar barı kapanışı) bu durumda açıkça korunur.
+            entry_price = float(df["close"].iloc[decision_idx])
+
         events.append({
             "decision_idx": decision_idx,
-            "entry": float(df["close"].iloc[decision_idx]),
+            "entry_idx": entry_idx,
+            "entry": entry_price,
             "tp1": res["tp1"],
             "tp2": res["tp2"],
             "sl": res["sl"],
@@ -165,12 +175,14 @@ def evaluate(events: list, df: pd.DataFrame, horizon: int, cost_rate: float = 0.
     n = len(df)
 
     for ev in events:
-        start = ev["decision_idx"] + 1
+        # Yeni olaylar için giriş mumu karar sonrası ilk bardır. Eski/harici
+        # olay kayıtları için karar sonrası bar davranışını geriye dönük koru.
+        start = ev.get("entry_idx", ev["decision_idx"] + 1)
         end = min(n, start + horizon)
         outcome, exit_price, exit_bar = "TIMEOUT", None, None
 
         for j in range(start, end):
-            # Muhafazakâr sıra: önce SL
+            # Muhafazakâr sıra: aynı mumda SL ve TP birlikte görülürse SL.
             if lows.iloc[j] <= ev["sl"]:
                 outcome, exit_price, exit_bar = "SL", ev["sl"], j
                 break
@@ -220,6 +232,16 @@ def summarize(trades: list) -> dict:
         sls = (sub["outcome"] == "SL").sum()
         timeouts = sub["outcome"].str.startswith("MTM").sum()
         avg_net = sub["net_pnl_pct"].mean() if "net_pnl_pct" in sub else None
+        net_pnl = sub["net_pnl_pct"].astype(float)
+        gross_profit = net_pnl[net_pnl > 0].sum()
+        gross_loss = -net_pnl[net_pnl < 0].sum()
+        profit_factor = (
+            round(float(gross_profit / gross_loss), 3)
+            if gross_loss > 0
+            else (float("inf") if gross_profit > 0 else None)
+        )
+        equity = net_pnl.cumsum()
+        max_drawdown = float((equity.cummax() - equity).max()) if len(equity) else 0.0
         return {
             "toplam": total,
             "kazanc": int(wins),
@@ -228,6 +250,8 @@ def summarize(trades: list) -> dict:
             "kazanc_orani": round(wins / total * 100, 1) if total else 0.0,
             "ort_net_yuzde": round(avg_net, 3) if pd.notna(avg_net) else None,
             "ort_bar": round(sub["bars_held"].dropna().mean(), 1) if sub["bars_held"].notna().any() else None,
+            "profit_factor": profit_factor,
+            "max_drawdown_pct": round(max_drawdown, 3),
         }
 
     summary = {"GENEL": stats(df)}
@@ -249,6 +273,11 @@ def format_report(summaries: dict, cost_rate: float = 0.0) -> str:
             lines.append(f"   Ortalama NET P/L: %{s['ort_net_yuzde']}")
         if s.get("ort_bar") is not None:
             lines.append(f"   Ortalama tutma süresi: {s['ort_bar']} bar")
+        if s.get("profit_factor") is not None:
+            pf = "∞" if s["profit_factor"] == float("inf") else s["profit_factor"]
+            lines.append(f"   Profit Factor: {pf}")
+        if s.get("max_drawdown_pct") is not None:
+            lines.append(f"   Maks. drawdown: %{s['max_drawdown_pct']}")
     return "\n".join(lines)
 
 
@@ -318,6 +347,11 @@ def run_backtest(stocks: list, cryptos: list, period: str, horizon: int,
             print(f"   Ort. NET P/L: %{s['ort_net_yuzde']}")
         if s.get("ort_bar") is not None:
             print(f"   Ort. tutma: {s['ort_bar']} bar")
+        if s.get("profit_factor") is not None:
+            pf = "∞" if s["profit_factor"] == float("inf") else s["profit_factor"]
+            print(f"   Profit Factor: {pf}")
+        if s.get("max_drawdown_pct") is not None:
+            print(f"   Maks. drawdown: %{s['max_drawdown_pct']}")
 
     rows = [{"market": m, "symbol": sym, **tr} for m, sym, tr in all_trades]
     os.makedirs(os.path.dirname(out_csv) or ".", exist_ok=True)
