@@ -52,7 +52,7 @@ SCAN_STOCKS = [
     "PGSUS.IS", "PETKM.IS", "SAHOL.IS", "SASA.IS", "SISE.IS", 
     "TCELL.IS", "THYAO.IS", "TOASO.IS", "TUPRS.IS", "YKBNK.IS",
     # Kullanıcı Eklemeleri
-    "KOTON.IS", "AAGYO.IS"
+    "KOTON.IS", "AAGYO.IS", "LINK.IS", "ALTNY.IS"
 ]
 
 # AL sinyali taraması yapılacak kripto paralar (Top 20)
