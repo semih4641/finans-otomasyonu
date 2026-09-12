@@ -31,6 +31,10 @@ from telegram.ext import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from risk import calculate_position_risk, format_position_risk
+from portfolio_risk import PortfolioState, portfolio_gate, calculate_portfolio_metrics, get_portfolio_config
+from signals_advanced import extract_features, generate_advanced_signals, score_signal_advanced, SignalFeatures
+from ml_model import SignalMLModel, RegimeAwareModelEnsemble
+import paper
 
 # .env dosyasından konfigürasyonu yükle
 load_dotenv()
@@ -105,9 +109,17 @@ MIN_SIGNAL_SCORE_BEAR = 4
 # Kriptoda eşik daha yüksek — skor 2 kümesi maliyetsiz bile sıfır beklentiliydi
 MIN_SIGNAL_SCORE_CRYPTO = 3
 # Stop mesafesi fiyatın bu yüzdesini geçemez (aşırı geniş stop engellenir)
-MAX_STOP_LOSS_PCT = 0.05
+MAX_STOP_LOSS_PCT = 0.04
 # Take Profit hedefleri en az bu Risk/Ödül oranını verecek şekilde kurulur
-MIN_RISK_REWARD_RATIO = 1.5
+MIN_RISK_REWARD_RATIO = 1.8
+
+# --- ML Model Ayarları ---
+ML_MODEL_TYPE = "rf"  # rf, gb, lr
+ML_MIN_CONFIDENCE = 0.55
+USE_ML_SCORING = True
+
+# --- Portfolio Risk Ayarları ---
+ENABLE_PORTFOLIO_RISK = True
 
 # Logging yapılandırması
 logging.basicConfig(
@@ -119,6 +131,68 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+# --- ML Model Ensemble (lazy init) ---
+_ml_ensemble: RegimeAwareModelEnsemble | None = None
+_ml_models_loaded = False
+
+# --- Portfolio State Tracking ---
+_portfolio_state = PortfolioState(
+    positions=[],
+    equity=100000.0,
+    peak_equity=100000.0,
+    daily_pnl=0.0,
+    account_size=100000.0,
+    price_data={},
+)
+
+
+def _get_ml_ensemble() -> RegimeAwareModelEnsemble:
+    global _ml_ensemble, _ml_models_loaded
+    if _ml_ensemble is None:
+        _ml_ensemble = RegimeAwareModelEnsemble(ML_MODEL_TYPE)
+        # Try to load existing models
+        from pathlib import Path
+        model_dir = Path("models")
+        if model_dir.exists():
+            for model_file in model_dir.glob("*.pkl"):
+                try:
+                    model = SignalMLModel.load(model_file)
+                    if model.regime:
+                        _ml_ensemble.models[model.regime] = model
+                    else:
+                        _ml_ensemble.global_model = model
+                    _ml_models_loaded = True
+                    logger.info(f"📂 ML model yüklendi: {model_file}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Model yüklenemedi {model_file}: {e}")
+    return _ml_ensemble
+
+
+def _update_portfolio_state() -> None:
+    """Update portfolio state from paper trading open positions."""
+    global _portfolio_state
+    try:
+        open_positions = paper._load_open()
+        if not open_positions:
+            return
+
+        _portfolio_state.positions = open_positions
+
+        # Calculate equity from settled trades
+        if paper.SETTLED_CSV.exists():
+            df = pd.read_csv(paper.SETTLED_CSV, encoding="utf-8-sig")
+            if not df.empty:
+                returns = df["net_pnl_pct"] / 100
+                equity = 100000.0 * (1 + returns).cumprod().iloc[-1]
+                _portfolio_state.equity = equity
+                _portfolio_state.peak_equity = max(_portfolio_state.peak_equity, equity)
+
+        # Update price data for correlation calculation
+        _portfolio_state.price_data = {}  # Will be populated async if needed
+
+    except Exception as e:
+        logger.warning(f"⚠️ Portfolio state güncellenemedi: {e}")
 
 
 # ============================================================================
@@ -510,11 +584,10 @@ def sizing_hint(entry: float, sl: float) -> str:
     return format_position_risk(calculate_position_risk(entry, sl))
 
 
-def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
+def detect_buy_signals(df: pd.DataFrame, market: str = "stock", symbol: str = "") -> dict:
     """
-    Fiyat verisinden AL sinyallerini tespit eder.
-    Birden fazla teknik indikatörü kontrol eder.
-
+    Fiyat verisinden AL sinyallerini tespit eder (Gelişmiş: ADX, Volume Profile, Regime, ML).
+    
     market: "stock" | "crypto" — kalibrasyon ağırlıkları ve skor eşiği buna göre seçilir.
 
     AL Sinyali Koşulları:
@@ -522,16 +595,23 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
     2. MACD Boğa Kesişimi: MACD çizgisi sinyal çizgisini yukarı kesiyor
     3. Altın Kesişim: 50 günlük SMA, 200 günlük SMA'yı yukarı kesiyor
     4. Hacim Patlaması: Son hacim, 20 günlük ortalama hacmin 1.5 katı
+    5. ADX Trend Gücü: ADX > 25 ve +DI > -DI
+    6. Bollinger Band Sıkışması: Bant genişliği < %5
+    7. VWAP Altında: Fiyat VWAP'ın %1+ altında
+    8. OBY Diverjans: OBV yukarı, RSI < 50
 
     Args:
         df: OHLCV DataFrame
+        market: "stock" | "crypto"
+        symbol: Sembol adı (ML scoring için)
 
     Returns:
-        dict: {"signals", "tp1", "tp2", "sl", "vade", "score", "trend", "rr"}
+        dict: {"signals", "tp1", "tp2", "sl", "vade", "score", "trend", "rr", "ml_score", "regime", "features"}
         Faz 2 kalite kapıları: konfluans skoru rejim eşiğini geçmeyen
         kurulumlar boş sinyal listesiyle bastırılır.
     """
     signals = []
+    base_signals = []
     try:
         close = df["close"] if "close" in df.columns else df["Close"]
         volume = df["volume"] if "volume" in df.columns else df.get("Volume")
@@ -547,7 +627,7 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
 
         if len(close) < 30:
             return {"signals": [], "tp1": 0.0, "tp2": 0.0, "sl": 0.0, "vade": "",
-                    "score": 0, "trend": "", "rr": None}
+                    "score": 0, "trend": "", "rr": None, "ml_score": 0.5, "regime": "UNKNOWN", "features": None}
 
         # --- 1. RSI Aşırı Satım Toparlanması ---
         rsi = _rsi_series(close)
@@ -558,9 +638,11 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
             # RSI 30 altından yukarı çıkıyor (toparlanma)
             if prev_rsi < 30 and curr_rsi >= 30:
                 signals.append(f"📈 RSI Toparlanma (RSI: {curr_rsi:.1f}, önceki: {prev_rsi:.1f})")
+                base_signals.append("📈 RSI Toparlanma")
             # RSI hâlâ aşırı satım bölgesinde (potansiyel dip)
             elif curr_rsi < 30:
                 signals.append(f"🔴 RSI Aşırı Satım (RSI: {curr_rsi:.1f})")
+                base_signals.append("🔴 RSI Aşırı Satım")
 
         # --- 2. MACD Boğa Kesişimi ---
         if len(close) >= 26:
@@ -575,6 +657,7 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
                 curr_diff = macd_line.iloc[-1] - signal_line.iloc[-1]
                 if prev_diff < 0 and curr_diff >= 0:
                     signals.append("🔀 MACD Boğa Kesişimi (MACD sinyal çizgisini yukarı kesti)")
+                    base_signals.append("🔀 MACD Boğa Kesişimi")
 
         # --- 3. Altın Kesişim (SMA 50 > SMA 200) ---
         if len(close) >= 200:
@@ -586,6 +669,7 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
                 curr_above = sma_50.iloc[-1] > sma_200.iloc[-1]
                 if not prev_above and curr_above:
                     signals.append("✨ Altın Kesişim (SMA50 > SMA200 — güçlü yükseliş sinyali)")
+                    base_signals.append("✨ Altın Kesişim")
 
         # --- 4. Hacim Patlaması ---
         if volume is not None and len(volume) >= 21:
@@ -594,21 +678,64 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
             if avg_volume > 0 and curr_volume > avg_volume * 1.5:
                 ratio = curr_volume / avg_volume
                 signals.append(f"🔊 Hacim Patlaması (hacim ortalamanın {ratio:.1f}x üzerinde)")
+                base_signals.append("🔊 Hacim Patlaması")
 
     except Exception as e:
-        logger.error(f"❌ Sinyal tespiti hatası: {e}")
+        logger.error(f"❌ Temel sinyal tespiti hatası: {e}")
+
+    # --- Gelişmiş Özellikler ve ML Scoring ---
+    ml_score = 0.5
+    regime = "UNKNOWN"
+    features: SignalFeatures | None = None
+    advanced_signals = []
+    score_reasons = []
+
+    if signals and USE_ML_SCORING:
+        try:
+            # Extract features for advanced analysis
+            features = extract_features(df, symbol, market)
+            regime = features.regime.value
+
+            # Generate advanced signals
+            advanced_result = generate_advanced_signals(df, symbol, market)
+            advanced_signals = advanced_result.get("base_signals", [])
+            ml_score = advanced_result.get("adjusted_score", 0) / max(advanced_result.get("base_score", 1), 1)
+            score_reasons = advanced_result.get("score_reasons", [])
+
+            # ML Model prediction
+            ensemble = _get_ml_ensemble()
+            if ensemble.global_model or features.regime in ensemble.models:
+                ml_prob, model_used = ensemble.predict(features)
+                ml_score = ml_prob
+                logger.debug(f"ML prediction ({model_used}): {ml_prob:.3f} for {symbol}")
+
+            # Apply advanced scoring
+            base_score = len(base_signals)
+            weights = SIGNAL_SCORES_CRYPTO if market == "crypto" else SIGNAL_SCORES_STOCK
+            weighted_score = sum(weights.get(_signal_category(s), 1) for s in base_signals)
+
+            # Combine traditional and ML scoring
+            final_score = int(weighted_score * 0.6 + ml_score * 10 * 0.4)
+            for reason in score_reasons:
+                signals.append(f"  → {reason}")
+
+        except Exception as e:
+            logger.error(f"❌ Gelişsin analizi hatası: {e}")
 
     result = {
         "signals": signals, "tp1": 0.0, "tp2": 0.0, "sl": 0.0, "vade": "",
         "score": 0, "trend": "", "rr": None,
+        "ml_score": ml_score,
+        "regime": regime,
+        "features": features,
     }
-    
+
     if signals:
         try:
             close = completed["close"] if "close" in completed.columns else completed["Close"]
             high = completed["high"] if "high" in completed.columns else completed.get("High", close)
             low = completed["low"] if "low" in completed.columns else completed.get("Low", close)
-            
+
             # ATR hesaplama (14 günlük)
             tr1 = high - low
             tr2 = (high - close.shift()).abs()
@@ -620,7 +747,11 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
 
             # --- Konfluans skoru: piyasa bazlı ağırlık tablosuyla ---
             weights = SIGNAL_SCORES_CRYPTO if market == "crypto" else SIGNAL_SCORES_STOCK
-            score = sum(weights.get(_signal_category(s), 1) for s in signals)
+            score = sum(weights.get(_signal_category(s), 1) for s in base_signals)
+
+            # ML skorunu da dahil et (0-1 arası, 10 ile çarpıp ağırlıklı ekle)
+            if USE_ML_SCORING:
+                score = int(score * 0.7 + ml_score * 10 * 0.3)
 
             # --- Trend rejimi: SMA200 üstü BOĞA, altı AYI piyasası ---
             trend = "BİLİNMİYOR"
@@ -639,9 +770,9 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
             tp1 = curr_price + max(atr * 1.5, risk * MIN_RISK_REWARD_RATIO)
             tp2 = curr_price + max(atr * 3.0, risk * MIN_RISK_REWARD_RATIO * 2)
             rr = round((tp1 - curr_price) / risk, 3) if risk > 0 else None
-            
+
             # Vade
-            if any("Altın Kesişim" in str(s) for s in signals):
+            if any("Altın Kesişim" in str(s) for s in base_signals):
                 vade = "Orta-Uzun Vade (1-3 Ay)"
             else:
                 vade = "Kısa Vade (1-3 Hafta)"
@@ -657,6 +788,8 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
                 gated_reason = f"geçersiz stop mesafesi (risk={risk})"
             elif score < threshold:
                 gated_reason = f"konfluans {score} < {threshold} [{trend}]"
+            elif USE_ML_SCORING and ml_score < ML_MIN_CONFIDENCE:
+                gated_reason = f"ML güven skoru düşük: {ml_score:.2f} < {ML_MIN_CONFIDENCE}"
 
             if gated_reason:
                 logger.info(f"🚫 Sinyal bastırıldı: {gated_reason}")
@@ -667,10 +800,10 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock") -> dict:
                 result["tp2"] = float(tp2)
                 result["sl"] = float(sl)
                 result["vade"] = vade
-            
+
         except Exception as e:
             logger.error(f"❌ TP/SL hesaplama hatası: {e}")
-            
+
     return result
 
 
@@ -713,12 +846,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🚀 <b>Sinyal Tarama</b>\n"
         "  /sinyal        →  BIST hisselerini AL sinyali için tara\n"
         "  /sinyal ASELS  →  Tek hisse sinyal analizi\n"
-        "  /kriptosinyal  →  Kripto paraları AL sinyali için tara\n\n"
+        "  /kriptosinyal  →  Kripto paraları AL sinyali için tara\n"
+        "  /tamtara       →  Hem hisse hem kripto tara\n\n"
+        "🤖 <b>ML & Portföy</b>\n"
+        "  /mltrain       →  ML modellerini eğit (quick opsiyonel)\n"
+        "  /portfoy       →  Portföy risk durumu ve metrikler\n\n"
         "🔧 <b>Diğer</b>\n"
-        "  /chatid  →  Chat ID'nizi öğrenin\n"
-        "  /izle    →  İzleme listesini görüntüle\n"
-        "  /start   →  Botu yeniden başlat\n"
-        "  /help    →  Bu mesajı göster\n\n"
+        "  /chatid   →  Chat ID'nizi öğrenin\n"
+        "  /izle     →  İzleme listesini görüntüle\n"
+        "  /start    →  Botu yeniden başlat\n"
+        "  /help     →  Bu mesajı göster\n\n"
         "⏰ <i>Bot her 15 dakikada bir AL sinyali taraması yapar\n"
         "ve fırsat bulursa otomatik uyarı gönderir.</i>"
     )
@@ -996,7 +1133,7 @@ async def sinyal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         actual_ticker = stock_data.get("ticker", ticker)
-        sig_result = detect_buy_signals(stock_data["history_df"], market="stock")
+        sig_result = detect_buy_signals(stock_data["history_df"], market="stock", symbol=actual_ticker)
         signals = sig_result["signals"]
         rsi = calculate_rsi(stock_data["history_df"])
         macd = calculate_macd(stock_data["history_df"])
@@ -1020,6 +1157,8 @@ async def sinyal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             message += f"  🛑 Stop Loss: <b>{sig_result['sl']:,.2f}</b>\n"
             message += f"  ✅ TP1 (Direnç 1): <b>{sig_result['tp1']:,.2f}</b>\n"
             message += f"  ✅ TP2 (Direnç 2): <b>{sig_result['tp2']:,.2f}</b>\n"
+            message += f"  🤖 ML Skor: <b>{sig_result.get('ml_score', 0):.2f}</b>\n"
+            message += f"  🎭 Rejim: <b>{sig_result.get('regime', 'UNKNOWN')}</b>\n"
         else:
             message += "\n⚪ <i>Şu an aktif AL sinyali yok.</i>\n"
 
@@ -1043,7 +1182,7 @@ async def sinyal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if data is None:
                 continue
 
-            sig_result = detect_buy_signals(data["history_df"], market="stock")
+            sig_result = detect_buy_signals(data["history_df"], market="stock", symbol=ticker)
             signals = sig_result["signals"]
             if signals:
                 actual_ticker = data.get("ticker", ticker)
@@ -1059,6 +1198,8 @@ async def sinyal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     "sl": sig_result["sl"],
                     "tp1": sig_result["tp1"],
                     "tp2": sig_result["tp2"],
+                    "ml_score": sig_result.get("ml_score"),
+                    "regime": sig_result.get("regime"),
                 })
         except Exception as e:
             logger.warning(f"⚠️ Sinyal tarama hatası ({ticker}): {e}")
@@ -1076,7 +1217,8 @@ async def sinyal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             message += f"  💵 Fiyat: {item['price']} | RSI: {item['rsi']}\n"
             for s in item["signals"]:
                 message += f"  {s}\n"
-            message += f"  ⏱️ Vade: {item['vade']} | 🛑 SL: {item['sl']:,.2f} | ✅ TP1: {item['tp1']:,.2f} | ✅ TP2: {item['tp2']:,.2f}\n\n"
+            message += f"  ⏱️ Vade: {item['vade']} | 🛑 SL: {item['sl']:,.2f} | ✅ TP1: {item['tp1']:,.2f} | ✅ TP2: {item['tp2']:,.2f}\n"
+            message += f"  🤖 ML: {item.get('ml_score', 0):.2f} | 🎭 Regime: {item.get('regime', 'UNKNOWN')}\n\n"
 
         message += f"⏰ <i>{datetime.now().strftime('%d.%m.%Y %H:%M')}</i>"
     else:
@@ -1115,7 +1257,7 @@ async def kriptosinyal_command(update: Update, context: ContextTypes.DEFAULT_TYP
             if data is None:
                 continue
 
-            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto")
+            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto", symbol=symbol)
             signals = sig_result["signals"]
             if signals:
                 rsi = calculate_rsi(data["ohlcv_df"])
@@ -1128,6 +1270,8 @@ async def kriptosinyal_command(update: Update, context: ContextTypes.DEFAULT_TYP
                     "sl": sig_result["sl"],
                     "tp1": sig_result["tp1"],
                     "tp2": sig_result["tp2"],
+                    "ml_score": sig_result.get("ml_score"),
+                    "regime": sig_result.get("regime"),
                 })
         except Exception as e:
             logger.warning(f"⚠️ Sinyal tarama hatası ({symbol}): {e}")
@@ -1145,7 +1289,8 @@ async def kriptosinyal_command(update: Update, context: ContextTypes.DEFAULT_TYP
             message += f"  💵 Fiyat: {item['price']} | RSI: {item['rsi']}\n"
             for s in item["signals"]:
                 message += f"  {s}\n"
-            message += f"  ⏱️ Vade: {item['vade']} | 🛑 SL: {format_crypto_price(item['sl'])} | ✅ TP1: {format_crypto_price(item['tp1'])} | ✅ TP2: {format_crypto_price(item['tp2'])}\n\n"
+            message += f"  ⏱️ Vade: {item['vade']} | 🛑 SL: {format_crypto_price(item['sl'])} | ✅ TP1: {format_crypto_price(item['tp1'])} | ✅ TP2: {format_crypto_price(item['tp2'])}\n"
+            message += f"  🤖 ML: {item.get('ml_score', 0):.2f} | 🎭 Regime: {item.get('regime', 'UNKNOWN')}\n\n"
 
         message += f"⏰ <i>{datetime.now().strftime('%d.%m.%Y %H:%M')}</i>"
     else:
@@ -1184,7 +1329,7 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if data is None:
                 continue
 
-            sig_result = detect_buy_signals(data["history_df"], market="stock")
+            sig_result = detect_buy_signals(data["history_df"], market="stock", symbol=ticker)
             signals = sig_result["signals"]
             if signals:
                 actual_ticker = data.get("ticker", ticker)
@@ -1199,6 +1344,8 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "sl": sig_result["sl"],
                     "tp1": sig_result["tp1"],
                     "tp2": sig_result["tp2"],
+                    "ml_score": sig_result.get("ml_score"),
+                    "regime": sig_result.get("regime"),
                 })
         except Exception as e:
             logger.warning(f"⚠️ Sinyal tarama hatası ({ticker}): {e}")
@@ -1211,7 +1358,7 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if data is None:
                 continue
 
-            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto")
+            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto", symbol=symbol)
             signals = sig_result["signals"]
             if signals:
                 rsi = calculate_rsi(data["ohlcv_df"])
@@ -1224,6 +1371,8 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "sl": sig_result["sl"],
                     "tp1": sig_result["tp1"],
                     "tp2": sig_result["tp2"],
+                    "ml_score": sig_result.get("ml_score"),
+                    "regime": sig_result.get("regime"),
                 })
         except Exception as e:
             logger.warning(f"⚠️ Sinyal tarama hatası ({symbol}): {e}")
@@ -1243,7 +1392,8 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             message += f"  💵 Fiyat: {item['price']} | RSI: {item['rsi']}\n"
             for s in item["signals"]:
                 message += f"  {s}\n"
-            message += f"  ⏱️ Vade: {item['vade']} | 🛑 SL: {item['sl']:,.2f} | ✅ TP1: {item['tp1']:,.2f} | ✅ TP2: {item['tp2']:,.2f}\n\n"
+            message += f"  ⏱️ Vade: {item['vade']} | 🛑 SL: {item['sl']:,.2f} | ✅ TP1: {item['tp1']:,.2f} | ✅ TP2: {item['tp2']:,.2f}\n"
+            message += f"  🤖 ML: {item.get('ml_score', 0):.2f} | 🎭 Regime: {item.get('regime', 'UNKNOWN')}\n\n"
     else:
         message += "📊 <b>HİSSE SENETLERİ:</b> Aktif sinyal bulunamadı.\n\n"
 
@@ -1255,7 +1405,8 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             message += f"  💵 Fiyat: {item['price']} | RSI: {item['rsi']}\n"
             for s in item["signals"]:
                 message += f"  {s}\n"
-            message += f"  ⏱️ Vade: {item['vade']} | 🛑 SL: {format_crypto_price(item['sl'])} | ✅ TP1: {format_crypto_price(item['tp1'])} | ✅ TP2: {format_crypto_price(item['tp2'])}\n\n"
+            message += f"  ⏱️ Vade: {item['vade']} | 🛑 SL: {format_crypto_price(item['sl'])} | ✅ TP1: {format_crypto_price(item['tp1'])} | ✅ TP2: {format_crypto_price(item['tp2'])}\n"
+            message += f"  🤖 ML: {item.get('ml_score', 0):.2f} | 🎭 Regime: {item.get('regime', 'UNKNOWN')}\n\n"
     else:
         message += "🪙 <b>KRİPTOLAR:</b> Aktif sinyal bulunamadı.\n\n"
 
@@ -1293,6 +1444,9 @@ async def scheduled_check(app: Application) -> None:
     div_alert_keys = []  # gönderilen temettü uyarılarının cooldown anahtarları
     logger.info("🔄 Zamanlayıcı: AL sinyali taraması başlıyor...")
 
+    # Update portfolio state before checking signals
+    _update_portfolio_state()
+
     # --- Kripto AL Sinyali Taraması ---
     for symbol in SCAN_CRYPTO:
         try:
@@ -1300,11 +1454,24 @@ async def scheduled_check(app: Application) -> None:
             if data is None:
                 continue
 
-            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto")
+            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto", symbol=symbol)
             # Cooldown'da olan sinyaller eleilir — aynı uyarı tekrar spam yapmaz
             signals = filter_cooldown(f"kripto:{symbol}", sig_result["signals"])
             if not signals:
                 continue
+
+            # Portfolio risk gate
+            if ENABLE_PORTFOLIO_RISK:
+                gate = portfolio_gate({
+                    "symbol": f"kripto:{symbol}",
+                    "entry_num": data["price"],
+                    "sl": sig_result["sl"],
+                    "tp1": sig_result["tp1"],
+                    "quantity": risk_result.quantity if (risk_result := calculate_position_risk(data["price"], sig_result["sl"])).is_calculable else 0,
+                }, _portfolio_state)
+                if not gate.allowed:
+                    logger.info(f"🚫 Portfolio risk gate blocked {symbol}: {gate.message}")
+                    continue
 
             rsi = calculate_rsi(data["ohlcv_df"])
             risk_result = calculate_position_risk(data["price"], sig_result["sl"])
@@ -1318,12 +1485,15 @@ async def scheduled_check(app: Application) -> None:
                 "signals": signals,
                 "skor": sig_result.get("score"),
                 "rejim": sig_result.get("trend"),
+                "regime": sig_result.get("regime"),
+                "ml_score": sig_result.get("ml_score"),
                 "rr": sig_result.get("rr"),
                 "vade": sig_result["vade"],
                 "sl": sig_result["sl"],
                 "tp1": sig_result["tp1"],
                 "tp2": sig_result["tp2"],
                 "risk": risk_result.as_dict(),
+                "sector": "CRYPTO",
             })
             pending_cooldown.append((f"kripto:{symbol}", signals))
         except Exception as e:
@@ -1337,16 +1507,34 @@ async def scheduled_check(app: Application) -> None:
                 continue
 
             actual_ticker = stock_data.get("ticker", ticker)
-            sig_result = detect_buy_signals(stock_data["history_df"], market="stock")
+            sig_result = detect_buy_signals(stock_data["history_df"], market="stock", symbol=actual_ticker)
             signals = filter_cooldown(f"hisse:{actual_ticker}", sig_result["signals"])
             if not signals:
                 continue
+
+            # Portfolio risk gate
+            if ENABLE_PORTFOLIO_RISK:
+                risk_result = calculate_position_risk(stock_data["price"], sig_result["sl"])
+                gate = portfolio_gate({
+                    "symbol": f"hisse:{actual_ticker}",
+                    "entry_num": stock_data["price"],
+                    "sl": sig_result["sl"],
+                    "tp1": sig_result["tp1"],
+                    "quantity": risk_result.quantity if risk_result.is_calculable else 0,
+                }, _portfolio_state)
+                if not gate.allowed:
+                    logger.info(f"🚫 Portfolio risk gate blocked {actual_ticker}: {gate.message}")
+                    continue
 
             name = stock_data["info"].get("shortName", actual_ticker)
             rsi = calculate_rsi(stock_data["history_df"])
             risk_result = calculate_position_risk(
                 stock_data["price"], sig_result["sl"]
             )
+            # Get sector from config
+            from portfolio_risk import get_portfolio_config
+            sector = get_portfolio_config().sector_mapping.get(actual_ticker, "UNKNOWN")
+
             buy_signal_items.append({
                 "name": f"📈 {name} ({actual_ticker})",
                 "key": f"hisse:{actual_ticker}",
@@ -1357,12 +1545,16 @@ async def scheduled_check(app: Application) -> None:
                 "signals": signals,
                 "skor": sig_result.get("score"),
                 "rejim": sig_result.get("trend"),
+                "regime": sig_result.get("regime"),
+                "ml_score": sig_result.get("ml_score"),
                 "rr": sig_result.get("rr"),
                 "vade": sig_result["vade"],
                 "sl": sig_result["sl"],
                 "tp1": sig_result["tp1"],
                 "tp2": sig_result["tp2"],
                 "risk": risk_result.as_dict(),
+                "sector": sector,
+                "portfolio_risk_pct": risk_result.risk_amount / 100000 * 100 if risk_result.is_calculable else 0,
             })
             pending_cooldown.append((f"hisse:{actual_ticker}", signals))
         except Exception as e:
@@ -1400,7 +1592,9 @@ async def scheduled_check(app: Application) -> None:
             message += f"  💵 Fiyat: {item['price']} | RSI: {item['rsi']}\n"
             message += (
                 f"  🎯 Skor: {item.get('skor', '?')} | "
+                f"ML: {item.get('ml_score', 0):.2f} | "
                 f"Rejim: {item.get('rejim') or '—'} | "
+                f"Regime: {item.get('regime') or '—'} | "
                 f"R/R: {item['rr'] if item.get('rr') is not None else '—'}\n"
             )
             entry_num = item.get("entry_num")
@@ -1408,7 +1602,7 @@ async def scheduled_check(app: Application) -> None:
                 message += sizing_hint(float(entry_num), float(item["sl"]))
             for s in item["signals"]:
                 message += f"  {s}\n"
-            
+
             if "🪙" in item["name"]:
                 message += f"  ⏱️ Vade: {item['vade']} | 🛑 SL: {format_crypto_price(item['sl'])} | ✅ TP1: {format_crypto_price(item['tp1'])} | ✅ TP2: {format_crypto_price(item['tp2'])}\n\n"
             else:
@@ -1456,6 +1650,95 @@ async def scheduled_check(app: Application) -> None:
 
 
 # ============================================================================
+# 8e. ML MODEL EĞİTİM KOMUTU (/mltrain)
+# ============================================================================
+async def mltrain_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /mltrain komutu — ML modellerini geçmiş veriyle eğitir.
+    /mltrain              → Tüm SCAN listeleriyle eğitir (uzun sürebilir)
+    /mltrain quick        → Hızlı eğitim (az veri)
+    """
+    msg = update.effective_message
+    quick_mode = context.args and context.args[0].lower() == "quick"
+
+    await msg.reply_text(
+        f"🤖 <b>ML Model Eğitimi Başlatılıyor...</b>\n"
+        f"Mod: {'Hızlı' if quick_mode else 'Tam'}\n"
+        f"Bu işlem birkaç dakika sürebilir.",
+        parse_mode="HTML",
+    )
+
+    try:
+        from ml_model import RegimeAwareModelEnsemble, prepare_training_data
+
+        symbols_stock = SCAN_STOCKS[:10] if quick_mode else SCAN_STOCKS
+        symbols_crypto = SCAN_CRYPTO[:5] if quick_mode else SCAN_CRYPTO
+
+        await msg.reply_text("📊 Hisse verileri toplanıyor...", parse_mode="HTML")
+        stock_features = prepare_training_data(symbols_stock, "stock", lookback_days=365 if not quick_mode else 180)
+
+        await msg.reply_text("🪙 Kripto verileri toplanıyor...", parse_mode="HTML")
+        crypto_features = prepare_training_data(symbols_crypto, "crypto", lookback_days=180 if not quick_mode else 90)
+
+        # Combine features by regime
+        from signals_advanced import MarketRegime
+        all_features = {r: [] for r in MarketRegime}
+        for regime, feats in stock_features.items():
+            all_features[regime].extend(feats)
+        for regime, feats in crypto_features.items():
+            all_features[regime].extend(feats)
+
+        ensemble = RegimeAwareModelEnsemble(ML_MODEL_TYPE)
+        results = ensemble.train(all_features, min_samples_per_regime=20 if quick_mode else 30)
+
+        response = "✅ <b>ML Eğitimi Tamamlandı</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        for regime, metrics in results.items():
+            response += f"📊 <b>{regime}</b>\n"
+            for k, v in metrics.items():
+                response += f"  {k}: {v}\n"
+            response += "\n"
+
+        await msg.reply_text(response, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"❌ ML eğitim hatası: {e}")
+        await msg.reply_text(f"❌ Eğitim hatası: {e}", parse_mode="HTML")
+
+
+# ============================================================================
+# 8f. PORTFÖY DURUM KOMUTU (/portfoy)
+# ============================================================================
+async def portfoy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /portfoy komutu — mevcut portföy risk metriklerini gösterir.
+    """
+    msg = update.effective_message
+
+    _update_portfolio_state()
+    metrics = calculate_portfolio_metrics(_portfolio_state)
+
+    message = (
+        "📊 <b>Portföy Risk Durumu</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💰 Equity: ${metrics.get('total_notional', 0):,.2f}\n"
+        f"📈 Peak Equity: ${_portfolio_state.peak_equity:,.2f}\n"
+        f"📉 Drawdown: %{metrics.get('drawdown_pct', 0):.2f}\n"
+        f"⚖️ Toplam Risk: ${metrics.get('total_risk', 0):,.2f}\n"
+        f"📊 VaR (95%): ${metrics.get('var_95', 0):,.2f}\n"
+        f"🔢 Açık Pozisyon: {metrics.get('total_positions', 0)}\n\n"
+    )
+
+    sector_exp = metrics.get('sector_exposure', {})
+    if sector_exp:
+        message += "🏭 <b>Sektör Dağılımı:</b>\n"
+        for sector, notional in sorted(sector_exp.items(), key=lambda x: -x[1]):
+            pct = notional / metrics.get('total_notional', 1) * 100
+            message += f"  {sector}: ${notional:,.0f} (%{pct:.1f})\n"
+
+    await msg.reply_text(message, parse_mode="HTML")
+
+
+# ============================================================================
 # 10. ANA ÇALIŞTIRMA DÖNGÜSÜ VE LOGLAMA
 # ============================================================================
 def main() -> None:
@@ -1485,6 +1768,8 @@ def main() -> None:
     app.add_handler(CommandHandler("kriptosinyal", kriptosinyal_command))
     app.add_handler(CommandHandler("tamtara", tamtara_command))
     app.add_handler(CommandHandler("performans", performans_command))
+    app.add_handler(CommandHandler("mltrain", mltrain_command))
+    app.add_handler(CommandHandler("portfoy", portfoy_command))
 
     # Arka plan zamanlayıcısını hazırla (henüz başlatma, event loop yok)
     scheduler = AsyncIOScheduler()
@@ -1511,6 +1796,8 @@ def main() -> None:
             BotCommand("kriptosinyal", "Kripto AL sinyali tara"),
             BotCommand("tamtara", "Hem hisse hem kripto tara"),
             BotCommand("performans", "Canlı sinyal performansı"),
+            BotCommand("mltrain", "ML modellerini eğit"),
+            BotCommand("portfoy", "Portföy risk durumu"),
             BotCommand("izle", "İzleme ve tarama listesi"),
             BotCommand("chatid", "Chat ID'nizi öğrenin"),
         ])

@@ -1,0 +1,28 @@
+{
+  "model_type": "rf",
+  "regime": "LOW_VOLATILITY",
+  "trained_at": "2026-09-12T23:21:49.676350",
+  "metrics": {
+    "precision": 0.3036,
+    "recall": 0.4161,
+    "f1": 0.3462,
+    "roc_auc": 0.6202
+  },
+  "feature_importance": {
+    "adx": 0.13848642802841157,
+    "di_plus": 0.07403999252986007,
+    "di_minus": 0.06372539856478829,
+    "rsi": 0.05513275906069877,
+    "macd_hist": 0.11670788608081105,
+    "atr_pct": 0.1304103816694541,
+    "bb_width": 0.09456633762291253,
+    "bb_position": 0.06226021114958581,
+    "volume_ratio": 0.037368857101167094,
+    "obv_trend_encoded": 0.005230651711298902,
+    "vwap_distance": 0.07502171770294802,
+    "regime_encoded": 0.0,
+    "higher_highs": 0.020164860236996485,
+    "lower_lows": 0.021574710968120473,
+    "trend_strength": 0.10530980757294692
+  }
+}
