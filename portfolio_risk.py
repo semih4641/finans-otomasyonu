@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import date, datetime
-from typing import Any, Iterable, Mapping, Optional
+from numbers import Integral, Real
+from typing import Any, Mapping, Optional
 
 import numpy as np
 import pandas as pd
 
-from risk import RiskConfig, RiskGate, PositionRisk, load_risk_config
+from risk import RiskConfig, load_risk_config
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +33,23 @@ class PortfolioConfig:
     correlation_lookback_days: int = DEFAULT_CORRELATION_LOOKBACK_DAYS
     min_correlation_threshold: float = DEFAULT_MIN_CORRELATION_THRESHOLD
     sector_mapping: dict[str, str] = field(default_factory=dict)
+    configuration_errors: tuple[str, ...] = ()
 
     @property
     def is_valid(self) -> bool:
-        return all([
-            0 < self.max_sector_exposure_pct <= 100,
-            0 < self.max_correlation_exposure_pct <= 100,
-            0 < self.max_portfolio_risk_pct <= 100,
-            0 < self.max_drawdown_pct <= 100,
-            self.correlation_lookback_days > 0,
-            0 <= self.min_correlation_threshold <= 1,
-        ])
+        limits = (self.max_sector_exposure_pct, self.max_correlation_exposure_pct,
+                  self.max_portfolio_risk_pct, self.max_drawdown_pct)
+        threshold = self.min_correlation_threshold
+        return (
+            not self.configuration_errors
+            and all(isinstance(value, Real) and not isinstance(value, bool)
+                    and math.isfinite(value) and 0 < value <= 100 for value in limits)
+            and isinstance(self.correlation_lookback_days, Integral)
+            and not isinstance(self.correlation_lookback_days, bool)
+            and self.correlation_lookback_days >= 3
+            and isinstance(threshold, Real) and not isinstance(threshold, bool)
+            and math.isfinite(threshold) and 0 <= threshold <= 1
+        )
 
 
 def load_portfolio_config(environ: Optional[Mapping[str, str]] = None) -> PortfolioConfig:
@@ -52,17 +58,20 @@ def load_portfolio_config(environ: Optional[Mapping[str, str]] = None) -> Portfo
     if environ is None:
         load_dotenv()
     env = os.environ if environ is None else environ
+    errors: list[str] = []
 
-    def _parse_float(name: str, default: float, maximum: float = 100.0) -> float:
+    def _parse_float(name: str, default: float, maximum: float = 100.0, allow_zero: bool = False) -> float:
         raw = env.get(name)
         if raw is None or not raw.strip():
             return default
         try:
             value = float(raw)
         except (TypeError, ValueError):
+            errors.append(f"{name} geçersiz sayı")
             logger.error("❌ Portfolio config: %s geçersiz sayı: %r", name, raw)
             return default
-        if not math.isfinite(value) or value <= 0 or value > maximum:
+        if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero) or value > maximum:
+            errors.append(f"{name} geçersiz aralık")
             logger.error("❌ Portfolio config: %s 0-%s aralığında olmalı: %r", name, maximum, raw)
             return default
         return value
@@ -74,10 +83,12 @@ def load_portfolio_config(environ: Optional[Mapping[str, str]] = None) -> Portfo
         try:
             value = int(raw)
         except (TypeError, ValueError):
+            errors.append(f"{name} tam sayı olmalı")
             logger.error("❌ Portfolio config: %s tam sayı olmalı: %r", name, raw)
             return default
-        if value <= 0:
-            logger.error("❌ Portfolio config: %s pozitif olmalı: %r", name, raw)
+        if value < 3:
+            errors.append(f"{name} en az 3 olmalı")
+            logger.error("❌ Portfolio config: %s en az 3 olmalı: %r", name, raw)
             return default
         return value
 
@@ -87,7 +98,8 @@ def load_portfolio_config(environ: Optional[Mapping[str, str]] = None) -> Portfo
         for pair in raw_sectors.split(","):
             if ":" in pair:
                 sym, sec = pair.split(":", 1)
-                sector_mapping[sym.strip().upper()] = sec.strip()
+                if sym.strip() and sec.strip():
+                    sector_mapping[sym.strip().upper()] = sec.strip()
 
     return PortfolioConfig(
         max_sector_exposure_pct=_parse_float("MAX_SECTOR_EXPOSURE_PCT", DEFAULT_MAX_SECTOR_EXPOSURE_PCT),
@@ -95,8 +107,9 @@ def load_portfolio_config(environ: Optional[Mapping[str, str]] = None) -> Portfo
         max_portfolio_risk_pct=_parse_float("MAX_PORTFOLIO_RISK_PCT", DEFAULT_MAX_PORTFOLIO_RISK_PCT),
         max_drawdown_pct=_parse_float("MAX_DRAWDOWN_PCT", DEFAULT_MAX_DRAWDOWN_PCT),
         correlation_lookback_days=_parse_int("CORRELATION_LOOKBACK_DAYS", DEFAULT_CORRELATION_LOOKBACK_DAYS),
-        min_correlation_threshold=_parse_float("MIN_CORRELATION_THRESHOLD", DEFAULT_MIN_CORRELATION_THRESHOLD, maximum=1.0),
+        min_correlation_threshold=_parse_float("MIN_CORRELATION_THRESHOLD", DEFAULT_MIN_CORRELATION_THRESHOLD, maximum=1.0, allow_zero=True),
         sector_mapping=sector_mapping,
+        configuration_errors=tuple(errors),
     )
 
 
@@ -131,6 +144,27 @@ def _get_sector(symbol: str, config: PortfolioConfig) -> str:
     return config.sector_mapping.get(symbol.upper(), "UNKNOWN")
 
 
+def _positive_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) and number > 0 and not isinstance(value, bool) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _position_notional(position: Mapping) -> float | None:
+    entry = _positive_number(position.get("entry_num", position.get("entry", position.get("entry_price"))))
+    quantity = _positive_number(position.get("quantity", position.get("size")))
+    if entry is None or quantity is None:
+        return None
+    notional = entry * quantity
+    return notional if math.isfinite(notional) else None
+
+
+def _symbol(position: Mapping) -> str:
+    return str(position.get("symbol") or "").split(":")[-1].upper()
+
+
 def _calculate_correlation_matrix(price_data: dict[str, pd.DataFrame], lookback: int) -> pd.DataFrame:
     """Calculate correlation matrix from close prices."""
     if not price_data:
@@ -141,7 +175,8 @@ def _calculate_correlation_matrix(price_data: dict[str, pd.DataFrame], lookback:
         if df is not None and len(df) >= lookback:
             close_col = "close" if "close" in df.columns else "Close"
             if close_col in df.columns:
-                closes[symbol] = df[close_col].tail(lookback).pct_change().dropna()
+                prices = pd.to_numeric(df[close_col], errors="coerce").tail(lookback)
+                closes[symbol.upper()] = prices.where(prices > 0).pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
 
     if len(closes) < 2:
         return pd.DataFrame()
@@ -159,18 +194,12 @@ def _portfolio_var(positions: list[Mapping], price_data: dict, config: Portfolio
     if not positions:
         return 0.0
 
-    risk_config = load_risk_config()
-    if not risk_config.is_valid or risk_config.account_size is None:
-        return 0.0
-
     weights = {}
     for pos in positions:
-        symbol = pos.get("symbol", "").split(":")[-1]
-        qty = pos.get("quantity") or pos.get("size")
-        entry = pos.get("entry") or pos.get("entry_price")
-        if qty and entry and qty > 0 and entry > 0:
-            notional = qty * entry
-            weights[symbol] = notional
+        symbol = _symbol(pos)
+        notional = _position_notional(pos)
+        if notional is not None:
+            weights[symbol] = weights.get(symbol, 0.0) + notional
 
     if not weights:
         return 0.0
@@ -187,10 +216,15 @@ def _portfolio_var(positions: list[Mapping], price_data: dict, config: Portfolio
         return sum(weights.values()) * 0.02
 
     corr_matrix = corr.loc[symbols, symbols].values
+    if not np.isfinite(corr_matrix).all():
+        return total_notional * 0.02
     vols = np.array([0.02] * len(symbols))
 
     cov = np.outer(vols, vols) * corr_matrix
-    portfol_vol = math.sqrt(w @ cov @ w)
+    variance = float(w @ cov @ w)
+    if variance < 0 or not math.isfinite(variance):
+        return total_notional * 0.02
+    portfol_vol = math.sqrt(variance)
     var_95 = 1.645 * portfol_vol * total_notional
 
     return var_95
@@ -206,39 +240,27 @@ def sector_exposure_gate(
     if not cfg.is_valid:
         return PortfolioGate(False, "CONFIG_INVALID", "portfolio config geçersiz.", True)
 
-    symbol = new_position.get("symbol", "").split(":")[-1]
+    symbol = _symbol(new_position)
+    new_notional = _position_notional(new_position)
+    equity = _positive_number(portfolio.equity)
+    if not symbol or new_notional is None:
+        return PortfolioGate(False, "INVALID_POSITION", "yeni pozisyon entry/qty geçersiz.")
+    if equity is None:
+        return PortfolioGate(False, "INVALID_EQUITY", "portföy özkaynağı sonlu ve pozitif olmalı.", True)
     sector = _get_sector(symbol, cfg)
     if sector == "UNKNOWN":
         return PortfolioGate(True, "SECTOR_UNKNOWN", "sektör bilinmiyor, kontrol atlandı.", details={"sector": sector})
 
-    entry = new_position.get("entry_num") or new_position.get("entry")
-    qty = new_position.get("quantity")
-    if not entry or not qty or entry <= 0 or qty <= 0:
-        return PortfolioGate(False, "INVALID_POSITION", "yeni pozisyon entry/qty geçersiz.", details={"entry": entry, "qty": qty})
-
-    new_notional = entry * qty
-
     sector_notional = 0.0
     for pos in portfolio.positions:
-        sym = pos.get("symbol", "").split(":")[-1]
+        sym = _symbol(pos)
         if _get_sector(sym, cfg) == sector:
-            q = pos.get("quantity") or pos.get("size")
-            e = pos.get("entry") or pos.get("entry_price")
-            if q and e and q > 0 and e > 0:
-                sector_notional += q * e
+            notional = _position_notional(pos)
+            if notional is None:
+                return PortfolioGate(False, "INVALID_EXISTING_POSITION", "mevcut sektör pozisyonunun tutarı hesaplanamadı.", True)
+            sector_notional += notional
 
-    total_notional = 0.0
-    for pos in portfolio.positions:
-        q = pos.get("quantity") or pos.get("size")
-        e = pos.get("entry") or pos.get("entry_price")
-        if q and e and q > 0 and e > 0:
-            total_notional += q * e
-    total_notional += new_notional
-
-    if total_notional <= 0:
-        return PortfolioGate(True, "NO_EXPOSURE", "toplam pozisyon yok.")
-
-    sector_pct = (sector_notional + new_notional) / total_notional * 100
+    sector_pct = (sector_notional + new_notional) / equity * 100
 
     if sector_pct > cfg.max_sector_exposure_pct:
         return PortfolioGate(
@@ -267,37 +289,35 @@ def correlation_exposure_gate(
     if not cfg.is_valid:
         return PortfolioGate(False, "CONFIG_INVALID", "portfolio config geçersiz.", True)
 
-    symbol = new_position.get("symbol", "").split(":")[-1]
-    entry = new_position.get("entry_num") or new_position.get("entry")
-    qty = new_position.get("quantity")
-    if not entry or not qty or entry <= 0 or qty <= 0:
+    symbol = _symbol(new_position)
+    new_notional = _position_notional(new_position)
+    equity = _positive_number(portfolio.equity)
+    if not symbol or new_notional is None:
         return PortfolioGate(False, "INVALID_POSITION", "yeni pozisyon entry/qty geçersiz.")
+    if equity is None:
+        return PortfolioGate(False, "INVALID_EQUITY", "portföy özkaynağı sonlu ve pozitif olmalı.", True)
 
-    new_notional = entry * qty
+    existing_notionals = []
+    for pos in portfolio.positions:
+        notional = _position_notional(pos)
+        if notional is None:
+            return PortfolioGate(False, "INVALID_EXISTING_POSITION", "mevcut pozisyonun tutarı hesaplanamadı.", True)
+        existing_notionals.append((_symbol(pos), notional))
 
     corr = _calculate_correlation_matrix(portfolio.price_data, cfg.correlation_lookback_days)
-    if corr.empty or symbol not in corr.index:
+    if (corr.empty or symbol not in corr.index) and not any(_symbol(pos) == symbol for pos in portfolio.positions):
         return PortfolioGate(True, "CORR_DATA_MISSING", "korelasyon verisi yok, kontrol atlandı.")
 
     correlated_notional = 0.0
-    total_notional = new_notional
     correlated_symbols = []
 
-    for pos in portfolio.positions:
-        sym = pos.get("symbol", "").split(":")[-1]
-        q = pos.get("quantity") or pos.get("size")
-        e = pos.get("entry") or pos.get("entry_price")
-        if q and e and q > 0 and e > 0:
-            notional = q * e
-            total_notional += notional
-            if sym in corr.index and corr.loc[symbol, sym] >= cfg.min_correlation_threshold:
-                correlated_notional += notional
-                correlated_symbols.append(sym)
+    for sym, notional in existing_notionals:
+        if sym == symbol or (symbol in corr.index and sym in corr.columns and corr.loc[symbol, sym] >= cfg.min_correlation_threshold):
+            correlated_notional += notional
+            correlated_symbols.append(sym)
 
-    if total_notional <= 0:
-        return PortfolioGate(True, "NO_EXPOSURE", "toplam pozisyon yok.")
-
-    corr_pct = correlated_notional / total_notional * 100
+    # A cluster includes the proposed position itself, measured against equity.
+    corr_pct = (correlated_notional + new_notional) / equity * 100 if correlated_symbols else 0.0
 
     if corr_pct > cfg.max_correlation_exposure_pct:
         return PortfolioGate(
@@ -331,26 +351,32 @@ def portfolio_risk_gate(
         return PortfolioGate(False, "RISK_CONFIG_INVALID", "risk config geçersiz veya ACCOUNT_SIZE yok.", True)
     if not pcfg.is_valid:
         return PortfolioGate(False, "PORTFOLIO_CONFIG_INVALID", "portfolio config geçersiz.", True)
+    account_size = _positive_number(rcfg.account_size)
+    if account_size is None:
+        return PortfolioGate(False, "RISK_CONFIG_INVALID", "ACCOUNT_SIZE sonlu ve pozitif olmalı.", True)
+    equity = _positive_number(portfolio.equity)
+    if equity is None:
+        return PortfolioGate(False, "INVALID_EQUITY", "portföy özkaynağı sonlu ve pozitif olmalı.", True)
 
     current_risk = 0.0
     for pos in portfolio.positions:
-        entry = pos.get("entry") or pos.get("entry_price")
-        sl = pos.get("sl") or pos.get("stop_loss")
-        qty = pos.get("quantity") or pos.get("size")
-        if entry and sl and qty and entry > sl > 0 and qty > 0:
-            risk_per_unit = entry - sl
-            current_risk += risk_per_unit * qty
+        entry = _positive_number(pos.get("entry_num", pos.get("entry", pos.get("entry_price"))))
+        sl = _positive_number(pos.get("sl", pos.get("stop_loss")))
+        qty = _positive_number(pos.get("quantity", pos.get("size")))
+        if entry is None or sl is None or qty is None:
+            return PortfolioGate(False, "INVALID_EXISTING_POSITION", "mevcut pozisyonun stop riski hesaplanamadı.", True)
+        current_risk += max(entry - sl, 0.0) * qty
 
-    new_entry = new_position.get("entry_num") or new_position.get("entry")
-    new_sl = new_position.get("sl") or new_position.get("stop_loss")
-    new_qty = new_position.get("quantity")
-    if new_entry and new_sl and new_qty and new_entry > new_sl > 0 and new_qty > 0:
+    new_entry = _positive_number(new_position.get("entry_num", new_position.get("entry")))
+    new_sl = _positive_number(new_position.get("sl", new_position.get("stop_loss")))
+    new_qty = _positive_number(new_position.get("quantity"))
+    if new_entry is not None and new_sl is not None and new_qty is not None and new_entry > new_sl:
         new_risk = (new_entry - new_sl) * new_qty
     else:
-        new_risk = 0.0
+        return PortfolioGate(False, "INVALID_POSITION", "yeni pozisyon entry/stop/qty geçersiz.")
 
     total_risk = current_risk + new_risk
-    risk_pct = total_risk / rcfg.account_size * 100 if rcfg.account_size > 0 else float("inf")
+    risk_pct = total_risk / equity * 100
 
     if risk_pct > pcfg.max_portfolio_risk_pct:
         return PortfolioGate(
@@ -378,10 +404,15 @@ def drawdown_gate(
     if not cfg.is_valid:
         return PortfolioGate(False, "CONFIG_INVALID", "portfolio config geçersiz.", True)
 
-    if portfolio.peak_equity <= 0:
-        return PortfolioGate(True, "NO_PEAK", "peak equity hesaplanamadı.")
+    peak = _positive_number(portfolio.peak_equity)
+    try:
+        equity = float(portfolio.equity)
+    except (TypeError, ValueError):
+        equity = float("nan")
+    if peak is None or not math.isfinite(equity):
+        return PortfolioGate(False, "INVALID_EQUITY", "özkaynak veya zirve değeri geçersiz.", True)
 
-    drawdown_pct = (portfolio.peak_equity - portfolio.equity) / portfolio.peak_equity * 100
+    drawdown_pct = max(0.0, (peak - equity) / peak * 100)
 
     if drawdown_pct >= cfg.max_drawdown_pct:
         return PortfolioGate(
@@ -407,16 +438,17 @@ def portfolio_gate(
     portfolio_config: Optional[PortfolioConfig] = None,
 ) -> PortfolioGate:
     """Apply all portfolio-level gates in sequence."""
-    gates = [
-        drawdown_gate(portfolio, portfolio_config),
-        portfolio_risk_gate(new_position, portfolio, risk_config, portfolio_config),
-        sector_exposure_gate(new_position, portfolio, portfolio_config),
-        correlation_exposure_gate(new_position, portfolio, portfolio_config),
-    ]
-
-    for gate in gates:
+    gates = []
+    for check in (
+        lambda: drawdown_gate(portfolio, portfolio_config),
+        lambda: portfolio_risk_gate(new_position, portfolio, risk_config, portfolio_config),
+        lambda: sector_exposure_gate(new_position, portfolio, portfolio_config),
+        lambda: correlation_exposure_gate(new_position, portfolio, portfolio_config),
+    ):
+        gate = check()
         if not gate.allowed:
             return gate
+        gates.append(gate)
 
     return PortfolioGate(
         True,

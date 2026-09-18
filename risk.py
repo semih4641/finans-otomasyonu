@@ -11,6 +11,7 @@ import math
 import os
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
+from numbers import Integral, Real
 from typing import Any, Iterable, Mapping, Optional
 
 from dotenv import load_dotenv
@@ -20,6 +21,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_POSITION_RISK_PCT = 1.0
 DEFAULT_MAX_OPEN_POSITIONS = 5
 DEFAULT_DAILY_LOSS_LIMIT_PCT = 2.0
+
+
+def _positive_finite(value: Any, maximum: Optional[float] = None) -> bool:
+    """Validate direct configuration values as well as environment values."""
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False
+    try:
+        return math.isfinite(value) and value > 0 and (
+            maximum is None or value <= maximum
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -34,7 +47,15 @@ class RiskConfig:
 
     @property
     def is_valid(self) -> bool:
-        return not self.configuration_errors
+        return (
+            not self.configuration_errors
+            and (self.account_size is None or _positive_finite(self.account_size))
+            and _positive_finite(self.position_risk_pct, 100.0)
+            and _positive_finite(self.daily_loss_limit_pct, 100.0)
+            and isinstance(self.max_open_positions, Integral)
+            and not isinstance(self.max_open_positions, bool)
+            and self.max_open_positions >= 1
+        )
 
 
 @dataclass(frozen=True)
@@ -181,7 +202,7 @@ def calculate_position_risk(
     try:
         entry_value = float(entry)
         stop_value = float(stop_loss)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         logger.error("❌ Risk hesabı: entry ve stop_loss sayısal olmalı.")
         return PositionRisk(
             None,
@@ -248,9 +269,21 @@ def calculate_position_risk(
             "ACCOUNT_SIZE tanımlı değil; pozisyon miktarı hesaplanmadı.",
         )
 
-    risk_amount = cfg.account_size * cfg.position_risk_pct / 100.0
+    risk_amount = cfg.account_size * (cfg.position_risk_pct / 100.0)
     quantity = risk_amount / risk_per_unit
     notional = quantity * entry_value
+    if not all(_positive_finite(value) for value in (risk_amount, quantity, notional)):
+        logger.error("❌ Risk hesabı: pozisyon boyutu sonlu ve pozitif hesaplanamadı.")
+        return PositionRisk(
+            entry_value,
+            stop_value,
+            risk_per_unit,
+            None,
+            None,
+            None,
+            "INVALID_INPUT",
+            "pozisyon boyutu sonlu ve pozitif hesaplanamadı; giriş değerlerini kontrol edin.",
+        )
     return PositionRisk(
         entry_value,
         stop_value,
@@ -336,9 +369,16 @@ def open_position_gate(
     cfg = config or RISK_CONFIG
     if not cfg.is_valid:
         return RiskGate(False, "CONFIG_INVALID", "risk yapılandırması geçersiz.", True)
-    if open_position_count < 0:
-        logger.error("❌ Risk kapısı: açık pozisyon sayısı negatif olamaz.")
-        return RiskGate(False, "INVALID_OPEN_COUNT", "açık pozisyon sayısı negatif olamaz.", True)
+    if (
+        isinstance(open_position_count, bool)
+        or not isinstance(open_position_count, Integral)
+        or open_position_count < 0
+    ):
+        logger.error("❌ Risk kapısı: açık pozisyon sayısı negatif olmayan bir tam sayı olmalı.")
+        return RiskGate(
+            False, "INVALID_OPEN_COUNT",
+            "açık pozisyon sayısı negatif olmayan bir tam sayı olmalı.", True,
+        )
     if open_position_count >= cfg.max_open_positions:
         return RiskGate(
             False,
@@ -370,14 +410,14 @@ def daily_loss_gate(
         )
     try:
         pnl = float(realized_net_pnl)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         logger.error("❌ Risk kapısı: günlük net P/L sayısal olmalı.")
         return RiskGate(False, "INVALID_DAILY_PNL", "günlük net P/L geçersiz.", True)
     if not math.isfinite(pnl):
         logger.error("❌ Risk kapısı: günlük net P/L sonlu olmalı.")
         return RiskGate(False, "INVALID_DAILY_PNL", "günlük net P/L sonlu olmalı.", True)
 
-    limit_amount = cfg.account_size * cfg.daily_loss_limit_pct / 100.0
+    limit_amount = cfg.account_size * (cfg.daily_loss_limit_pct / 100.0)
     if pnl <= -limit_amount:
         return RiskGate(
             False,

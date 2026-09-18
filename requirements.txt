@@ -1,7 +1,10 @@
-# Sürümler kurulu ve doğrulanmış sürümlerle sınırlandı (gerçek para öncesi tekrarlanabilir ortam)
+# Bağımlılık aralıkları; tam sürüm kilidi değildir.
 python-telegram-bot[ext]>=20.0,<23
 yfinance>=0.2.0,<2
 ccxt>=4.0.0,<5
 pandas>=2.0.0,<3
+numpy>=1.24,<3
+scikit-learn>=1.7,<1.8
 APScheduler>=3.10.0,<4
 python-dotenv>=1.0.0,<2
+matplotlib>=3.8,<4

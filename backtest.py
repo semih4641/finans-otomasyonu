@@ -1,7 +1,7 @@
 """
 Faz 3: Backtest Motoru
 ======================
-Üretimdeki sinyal mantığını (bot.detect_buy_signals) geçmiş veri üzerinde
+Üretimdeki sinyal mantığını (signal_engine.detect_buy_signals) geçmiş veri üzerinde
 walk-forward yöntemiyle çalıştırır ve her kurulumun TP1 / TP2 / SL
 sonucunu ölçer. Böylece skor ağırlıkları ve eşikler gerçek veriyle
 değerlendirilebilir.
@@ -18,28 +18,27 @@ Notlar:
 - Cooldown: canlıdaki SIGNAL_COOLDOWN_HOURS davranışı taklit edilir
   (günlük barda 1 bar, saatlik barda 24 bar).
 - Muhafazakâr değerlendirme: aynı barda hem SL hem TP seviyesine
-  dokunulduysa SL sayılır; TP1'e ve TP2'ye aynı barda dokunulduysa
-  yalnızca TP1 kazanılır.
+  dokunulduysa SL sayılır. İlk hedef mumunda TP2 de görülürse TP2,
+  aksi halde TP1 ile kapanır (paper.py ile aynı çıkış modeli).
 """
 
 import argparse
 import logging
+import math
 import os
 import sys
 from datetime import datetime
+from numbers import Integral
 
 import pandas as pd
 
-from bot import (
-    SCAN_STOCKS,
-    SCAN_CRYPTO,
-    CRYPTO_EXCHANGES,
-    detect_buy_signals,
-    _signal_category,
-)
+from bot import BIST_ONLY, SCAN_STOCKS, SCAN_CRYPTO
+from data_fetcher import CRYPTO_EXCHANGES
+from market_data import completed_bist_daily
+from signal_engine import detect_buy_signals, _signal_category
 
 # Walk-forward binlerce bastırma kararı üretir; rapor gürültüsünü engelle
-logging.getLogger("bot").setLevel(logging.ERROR)
+logging.getLogger("signal_engine").setLevel(logging.ERROR)
 
 # Varsayılan parametreler
 DEFAULT_PERIOD = "1y"
@@ -55,7 +54,15 @@ DEFAULT_SLIP_BPS = 5
 
 def net_return_pct(entry: float, exit_price: float, cost_rate: float) -> float:
     """Girişte ve çıkışta komisyon+kayma uygulanmış net getiri (%)."""
+    _validate_cost_rate(cost_rate)
+    if not all(math.isfinite(price) and price > 0 for price in (entry, exit_price)):
+        raise ValueError("Giriş ve çıkış fiyatları pozitif ve sonlu olmalı.")
     return ((exit_price * (1 - cost_rate)) / (entry * (1 + cost_rate)) - 1.0) * 100
+
+
+def _validate_cost_rate(cost_rate: float) -> None:
+    if not math.isfinite(cost_rate) or not 0 <= cost_rate < 1:
+        raise ValueError("Tek yön maliyet oranı 0 (dahil) ile 1 arasında olmalı.")
 
 
 # ============================================================================
@@ -71,6 +78,10 @@ def load_stock(ticker_symbol: str, period: str) -> pd.DataFrame | None:
         for symbol in candidates:
             df = yf.Ticker(symbol).history(period=period, auto_adjust=True)
             if df is None or df.empty:
+                continue
+            if symbol.upper().endswith(".IS"):
+                df = completed_bist_daily(df)
+            if df.empty:
                 continue
             df.columns = [str(c).lower() for c in df.columns]
             print(f"  ✅ {symbol}: {len(df)} bar")
@@ -119,21 +130,30 @@ def walk_forward(df: pd.DataFrame, cooldown_bars: int, market: str = "stock") ->
     Dönen her olay: karar barı, karar sonrası ilk bar açılışından giriş fiyatı,
     TP/SL ve meta alanları taşır. Açılış sütunu yoksa kapanış fiyatı kullanılır.
     """
+    if isinstance(cooldown_bars, bool) or not isinstance(cooldown_bars, Integral) or cooldown_bars < 0:
+        raise ValueError("Cooldown negatif olmayan bir tam sayı olmalı.")
     events = []
     last_fire: dict = {}  # kategori -> son karar barı
     n = len(df)
-    for i in range(MIN_BARS_FOR_SCAN, n):
-        res = detect_buy_signals(df.iloc[:i], market=market)
+    for i in range(MIN_BARS_FOR_SCAN, n + 1):
+        history = df.iloc[:i].copy()
+        history.attrs["completed_only"] = False
+        # A model trained on today's full history must never score its own past.
+        # ML validation belongs to train_bist's purged temporal holdout.
+        res = detect_buy_signals(history, market=market, use_ml=False)
         if not res["signals"]:
             continue
 
         decision_idx = i - 2  # dilimde atılan 'oluşan' mum öncesi son kapanmış bar
         cats = {_signal_category(s) for s in res["signals"]}
 
-        # Cooldown: kategorilerden biri hâlâ sessizlik süresindeyse kurulumu sayma
-        if any(
-            decision_idx - last_fire.get(c, -(10**9)) <= cooldown_bars for c in cats
-        ):
+        # Canlı filtre gibi yalnızca süresi dolan kategorileri bildir. Sınırda
+        # (örn. tam 24 saat sonra) sinyal tekrar üretilebilir.
+        cats = {
+            c for c in cats
+            if decision_idx - last_fire.get(c, -(10**9)) >= cooldown_bars
+        }
+        if not cats:
             continue
         for c in cats:
             last_fire[c] = decision_idx
@@ -167,18 +187,30 @@ def walk_forward(df: pd.DataFrame, cooldown_bars: int, market: str = "stock") ->
 def evaluate(events: list, df: pd.DataFrame, horizon: int, cost_rate: float = 0.0) -> list:
     """Her olayın TP1 → TP2 → SL yolculuğunu ileriye dönük pencerelerde takip eder.
 
-    TIMEOUT kalan kurulumlar pencere sonunda mark-to-market edilir — böylece
-    gerçekleşmemiş zarar/kar raporda görünür olur.
+    Yalnız tam sonuç penceresi bulunan kurulumlar ölçülür. Böylece veri sonundaki
+    erken kazananlar seçilip henüz açık kalan işlemler dışlanmış olmaz.
     """
+    if isinstance(horizon, bool) or not isinstance(horizon, Integral) or horizon < 1:
+        raise ValueError("Sonuç penceresi pozitif bir tam sayı olmalı.")
+    _validate_cost_rate(cost_rate)
     trades = []
     lows, highs, closes = df["low"], df["high"], df["close"]
     n = len(df)
 
     for ev in events:
+        # Match training and pending paper entries: a gap outside the setup's
+        # stop/target range is not a fill at a valid risk/reward entry.
+        levels = [ev[key] for key in ("sl", "entry", "tp1", "tp2")]
+        if not all(math.isfinite(value) for value in levels) or not 0 < levels[0] < levels[1] < levels[2] <= levels[3]:
+            continue
         # Yeni olaylar için giriş mumu karar sonrası ilk bardır. Eski/harici
         # olay kayıtları için karar sonrası bar davranışını geriye dönük koru.
         start = ev.get("entry_idx", ev["decision_idx"] + 1)
-        end = min(n, start + horizon)
+        if isinstance(start, bool) or not isinstance(start, Integral) or start < 0:
+            raise ValueError("Giriş barı negatif olmayan bir tam sayı olmalı.")
+        if start + horizon > n:
+            continue
+        end = start + horizon
         outcome, exit_price, exit_bar = "TIMEOUT", None, None
 
         for j in range(start, end):
@@ -215,7 +247,7 @@ def evaluate(events: list, df: pd.DataFrame, horizon: int, cost_rate: float = 0.
             "outcome": ("MTM-" + outcome) if mtm else outcome,
             "pnl_pct": round(pnl_gross, 3),
             "net_pnl_pct": round(pnl_net, 3),
-            "bars_held": (exit_bar - ev["decision_idx"]) if exit_bar is not None else None,
+            "bars_held": (exit_bar - start + 1) if exit_bar is not None else None,
         })
     return trades
 
@@ -240,8 +272,11 @@ def summarize(trades: list) -> dict:
             if gross_loss > 0
             else (float("inf") if gross_profit > 0 else None)
         )
+        # Eşit ağırlıklı işlem getirilerinin toplamsal eğrisi; başlangıç
+        # sermayesi/pozisyon çakışması modellenen bir portföy eğrisi değildir.
+        # Başlangıçtaki 0 tepesi ilk işlemdeki zararı da kapsamalı.
         equity = net_pnl.cumsum()
-        max_drawdown = float((equity.cummax() - equity).max()) if len(equity) else 0.0
+        max_drawdown = float((equity.cummax().clip(lower=0) - equity).max()) if len(equity) else 0.0
         return {
             "toplam": total,
             "kazanc": int(wins),
@@ -362,12 +397,12 @@ def run_backtest(stocks: list, cryptos: list, period: str, horizon: int,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Faz 3 Backtest Motoru")
-    parser.add_argument("--stocks", default="AAPL,MSFT,THYAO.IS",
+    parser.add_argument("--stocks", default="THYAO.IS,ASELS.IS,TUPRS.IS",
                         help="Virgülle ayrılmış hisse listesi")
-    parser.add_argument("--crypto", default="BTC/USDT",
+    parser.add_argument("--crypto", default="",
                         help="Virgülle ayrılmış kripto parite listesi")
     parser.add_argument("--all", action="store_true",
-                        help="Tüm SCAN_STOCKS ve SCAN_CRYPTO listesini tara")
+                        help="Tüm tarama listesini kullan (BIST_ONLY açıkken yalnız hisseler)")
     parser.add_argument("--period", default=DEFAULT_PERIOD, help="yfinance dönem aralığı")
     parser.add_argument("--horizon", type=int, default=DEFAULT_HORIZON,
                         help="Sonuç penceresi (bar)")
@@ -378,8 +413,13 @@ def main() -> None:
                         help="Tek yön kayma/slippage (baz puan, varsayılan 5)")
     args = parser.parse_args()
 
+    if args.horizon < 1:
+        parser.error("--horizon pozitif olmalı")
+    if args.fee_bps < 0 or args.slip_bps < 0 or args.fee_bps + args.slip_bps >= 10000:
+        parser.error("komisyon/kayma negatif olamaz ve toplamları 10000 baz puandan küçük olmalı")
+
     stocks = SCAN_STOCKS if args.all else [s.strip() for s in args.stocks.split(",") if s.strip()]
-    cryptos = SCAN_CRYPTO if args.all else [c.strip() for c in args.crypto.split(",") if c.strip()]
+    cryptos = ([] if BIST_ONLY else SCAN_CRYPTO) if args.all else [c.strip() for c in args.crypto.split(",") if c.strip()]
     cost_rate = (args.fee_bps + args.slip_bps) / 10000.0
 
     run_backtest(stocks, cryptos, args.period, args.horizon, args.out, cost_rate)

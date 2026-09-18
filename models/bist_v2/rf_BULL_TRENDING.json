@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "training_scope": "BIST",
+  "target": "technical_tp1_before_stop",
+  "feature_columns": [
+    "adx",
+    "di_plus",
+    "di_minus",
+    "rsi",
+    "macd_hist_pct",
+    "atr_pct",
+    "bb_width",
+    "bb_position",
+    "volume_ratio",
+    "obv_trend_encoded",
+    "vwap_distance",
+    "regime_encoded",
+    "higher_highs",
+    "lower_lows",
+    "trend_strength"
+  ],
+  "model_type": "rf",
+  "regime": "BULL_TRENDING",
+  "trained_at": "2026-09-16T23:35:14.756722",
+  "metrics": {
+    "precision": 0.3697,
+    "recall": 0.4464,
+    "f1": 0.3885,
+    "roc_auc": 0.4542
+  },
+  "feature_importance": {
+    "adx": 0.07921460626848265,
+    "di_plus": 0.14568637695829212,
+    "di_minus": 0.07882776932643291,
+    "rsi": 0.0829509672220413,
+    "macd_hist_pct": 0.08725120039978487,
+    "atr_pct": 0.07759165820424839,
+    "bb_width": 0.08049273224508655,
+    "bb_position": 0.08542209673190503,
+    "volume_ratio": 0.09151377354186764,
+    "obv_trend_encoded": 0.0,
+    "vwap_distance": 0.07218443299460482,
+    "regime_encoded": 0.0,
+    "higher_highs": 0.017466127995334424,
+    "lower_lows": 0.032730475235940366,
+    "trend_strength": 0.06866778287597887
+  }
+}

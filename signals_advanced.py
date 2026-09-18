@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+from market_data import completed_candles
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class SignalFeatures:
     rsi: Optional[float] = None
     rsi_trend: Optional[str] = None
     macd_hist: Optional[float] = None
+    macd_hist_pct: Optional[float] = None
     macd_hist_trend: Optional[str] = None
 
     # Volatility
@@ -71,24 +73,33 @@ class SignalFeatures:
 
 
 def _completed_candles(df: pd.DataFrame, analyze_completed_only: bool = True) -> pd.DataFrame:
-    if analyze_completed_only and df is not None and len(df) > 2:
-        return df.iloc[:-1]
-    return df
+    return completed_candles(df, analyze_completed_only)
 
 
-def calculate_adx(df: pd.DataFrame, period: int = 14) -> dict[str, Optional[float]]:
+def _finite_float(value: Any, digits: int = 2) -> Optional[float]:
+    """Keep missing/warm-up values out of scoring and model inputs."""
+    try:
+        value = float(value)
+        return round(value, digits) if np.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def calculate_adx(
+    df: pd.DataFrame, period: int = 14, *, analyze_completed_only: bool = True,
+) -> dict[str, Optional[float]]:
     """Calculate ADX, +DI, -DI using Wilder's smoothing."""
     try:
-        df = _completed_candles(df)
+        df = _completed_candles(df, analyze_completed_only)
         high = df["high"] if "high" in df.columns else df["High"]
         low = df["low"] if "low" in df.columns else df["Low"]
         close = df["close"] if "close" in df.columns else df["Close"]
 
-        plus_dm = high.diff()
-        minus_dm = low.diff().abs()
-
-        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+        up_move = high.diff()
+        down_move = -low.diff()
+        # Compare the original moves: only the larger positive move contributes.
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
 
         tr1 = high - low
         tr2 = (high - close.shift()).abs()
@@ -96,26 +107,31 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> dict[str, Optional[floa
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
         atr = tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-        plus_di = 100 * (plus_dm.ewm(alpha=1/period, min_periods=period, adjust=False).mean() / atr)
-        minus_di = 100 * (minus_dm.ewm(alpha=1/period, min_periods=period, adjust=False).mean() / atr)
-
-        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+        plus_di = 100 * (plus_dm.ewm(alpha=1/period, min_periods=period, adjust=False).mean() / atr.where(atr != 0))
+        minus_di = 100 * (minus_dm.ewm(alpha=1/period, min_periods=period, adjust=False).mean() / atr.where(atr != 0))
+        plus_di = plus_di.mask(atr == 0, 0.0)
+        minus_di = minus_di.mask(atr == 0, 0.0)
+        total_di = plus_di + minus_di
+        dx = (100 * (plus_di - minus_di).abs() / total_di.where(total_di != 0)).mask(total_di == 0, 0.0)
         adx = dx.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
 
         return {
-            "adx": round(float(adx.iloc[-1]), 2) if not pd.isna(adx.iloc[-1]) else None,
-            "di_plus": round(float(plus_di.iloc[-1]), 2) if not pd.isna(plus_di.iloc[-1]) else None,
-            "di_minus": round(float(minus_di.iloc[-1]), 2) if not pd.isna(minus_di.iloc[-1]) else None,
+            "adx": _finite_float(adx.iloc[-1]),
+            "di_plus": _finite_float(plus_di.iloc[-1]),
+            "di_minus": _finite_float(minus_di.iloc[-1]),
         }
     except Exception as e:
         logger.error(f"❌ ADX hesaplanamadı: {e}")
         return {"adx": None, "di_plus": None, "di_minus": None}
 
 
-def calculate_bollinger_bands(df: pd.DataFrame, period: int = 20, std_dev: float = 2.0) -> dict[str, Optional[float]]:
+def calculate_bollinger_bands(
+    df: pd.DataFrame, period: int = 20, std_dev: float = 2.0,
+    *, analyze_completed_only: bool = True,
+) -> dict[str, Optional[float]]:
     """Calculate Bollinger Bands width and position."""
     try:
-        df = _completed_candles(df)
+        df = _completed_candles(df, analyze_completed_only)
         close = df["close"] if "close" in df.columns else df["Close"]
 
         sma = close.rolling(window=period).mean()
@@ -123,25 +139,26 @@ def calculate_bollinger_bands(df: pd.DataFrame, period: int = 20, std_dev: float
         upper = sma + std_dev * std
         lower = sma - std_dev * std
 
-        bb_width = (upper - lower) / sma
-        bb_position = (close - lower) / (upper - lower)
+        spread = upper - lower
+        bb_width = spread / sma.where(sma != 0)
+        bb_position = ((close - lower) / spread.where(spread != 0)).mask(spread == 0, 0.5)
 
         return {
-            "bb_width": round(float(bb_width.iloc[-1]), 4) if not pd.isna(bb_width.iloc[-1]) else None,
-            "bb_position": round(float(bb_position.iloc[-1]), 4) if not pd.isna(bb_position.iloc[-1]) else None,
-            "upper": round(float(upper.iloc[-1]), 2) if not pd.isna(upper.iloc[-1]) else None,
-            "lower": round(float(lower.iloc[-1]), 2) if not pd.isna(lower.iloc[-1]) else None,
-            "middle": round(float(sma.iloc[-1]), 2) if not pd.isna(sma.iloc[-1]) else None,
+            "bb_width": _finite_float(bb_width.iloc[-1], 4),
+            "bb_position": _finite_float(bb_position.iloc[-1], 4),
+            "upper": _finite_float(upper.iloc[-1]),
+            "lower": _finite_float(lower.iloc[-1]),
+            "middle": _finite_float(sma.iloc[-1]),
         }
     except Exception as e:
         logger.error(f"❌ Bollinger Bands hesaplanamadı: {e}")
         return {"bb_width": None, "bb_position": None, "upper": None, "lower": None, "middle": None}
 
 
-def calculate_obv(df: pd.DataFrame) -> dict[str, Optional[float]]:
+def calculate_obv(df: pd.DataFrame, *, analyze_completed_only: bool = True) -> dict[str, Any]:
     """Calculate On-Balance Volume and trend."""
     try:
-        df = _completed_candles(df)
+        df = _completed_candles(df, analyze_completed_only)
         close = df["close"] if "close" in df.columns else df["Close"]
         volume = df["volume"] if "volume" in df.columns else df.get("Volume")
 
@@ -149,13 +166,15 @@ def calculate_obv(df: pd.DataFrame) -> dict[str, Optional[float]]:
             return {"obv": None, "obv_trend": None}
 
         price_change = close.diff()
-        obv = (volume * np.sign(price_change)).cumsum()
+        obv = (volume * np.sign(price_change.fillna(0))).cumsum()
         obv_sma = obv.rolling(window=20).mean()
 
-        obv_trend = "UP" if obv.iloc[-1] > obv_sma.iloc[-1] else "DOWN"
+        obv_trend = None
+        if pd.notna(obv.iloc[-1]) and pd.notna(obv_sma.iloc[-1]):
+            obv_trend = "UP" if obv.iloc[-1] > obv_sma.iloc[-1] else "DOWN" if obv.iloc[-1] < obv_sma.iloc[-1] else "FLAT"
 
         return {
-            "obv": round(float(obv.iloc[-1]), 2) if not pd.isna(obv.iloc[-1]) else None,
+            "obv": _finite_float(obv.iloc[-1]),
             "obv_trend": obv_trend,
         }
     except Exception as e:
@@ -163,10 +182,12 @@ def calculate_obv(df: pd.DataFrame) -> dict[str, Optional[float]]:
         return {"obv": None, "obv_trend": None}
 
 
-def calculate_vwap_distance(df: pd.DataFrame, period: int = 20) -> Optional[float]:
+def calculate_vwap_distance(
+    df: pd.DataFrame, period: int = 20, *, analyze_completed_only: bool = True,
+) -> Optional[float]:
     """Calculate distance from VWAP as percentage."""
     try:
-        df = _completed_candles(df)
+        df = _completed_candles(df, analyze_completed_only)
         close = df["close"] if "close" in df.columns else df["Close"]
         high = df["high"] if "high" in df.columns else df["High"]
         low = df["low"] if "low" in df.columns else df["Low"]
@@ -179,29 +200,26 @@ def calculate_vwap_distance(df: pd.DataFrame, period: int = 20) -> Optional[floa
         vwap = (typical_price * volume).rolling(window=period).sum() / volume.rolling(window=period).sum()
         distance = (close.iloc[-1] - vwap.iloc[-1]) / vwap.iloc[-1] * 100
 
-        return round(float(distance), 2) if not pd.isna(distance) else None
+        return _finite_float(distance)
     except Exception as e:
         logger.error(f"❌ VWAP distance hesaplanamadı: {e}")
         return None
 
 
-def detect_market_regime(df: pd.DataFrame, lookback: int = 50) -> tuple[MarketRegime, float]:
+def detect_market_regime(
+    df: pd.DataFrame, lookback: int = 50, *, analyze_completed_only: bool = True,
+) -> tuple[MarketRegime, float]:
     """Detect market regime using ADX, volatility, and trend structure."""
     try:
-        df = _completed_candles(df)
+        df = _completed_candles(df, analyze_completed_only)
         close = df["close"] if "close" in df.columns else df["Close"]
-        high = df["high"] if "high" in df.columns else df["High"]
-        low = df["low"] if "low" in df.columns else df["Low"]
-
-        if len(close) < lookback:
+        if len(close) < max(lookback, 20):
             return MarketRegime.UNKNOWN, 0.0
 
         recent = close.tail(lookback)
 
-        adx_data = calculate_adx(df)
+        adx_data = calculate_adx(df, analyze_completed_only=False)
         adx = adx_data.get("adx") or 0
-        di_plus = adx_data.get("di_plus") or 0
-        di_minus = adx_data.get("di_minus") or 0
 
         returns = recent.pct_change().dropna()
         volatility = returns.std() * np.sqrt(252 if len(returns) > 100 else len(returns))
@@ -210,14 +228,6 @@ def detect_market_regime(df: pd.DataFrame, lookback: int = 50) -> tuple[MarketRe
         sma_20 = close.rolling(20).mean().iloc[-1]
         sma_50 = close.rolling(50).mean().iloc[-1] if len(close) >= 50 else sma_20
         current_price = close.iloc[-1]
-
-        higher_highs = 0
-        lower_lows = 0
-        for i in range(-10, -1):
-            if high.iloc[i] > high.iloc[i-1]:
-                higher_highs += 1
-            if low.iloc[i] < low.iloc[i-1]:
-                lower_lows += 1
 
         trend_up = current_price > sma_20 > sma_50
         trend_down = current_price < sma_20 < sma_50
@@ -252,19 +262,23 @@ def detect_market_regime(df: pd.DataFrame, lookback: int = 50) -> tuple[MarketRe
         return MarketRegime.UNKNOWN, 0.0
 
 
-def detect_volume_anomaly(df: pd.DataFrame, lookback: int = 20) -> dict[str, Any]:
+def detect_volume_anomaly(
+    df: pd.DataFrame, lookback: int = 20, *, analyze_completed_only: bool = True,
+) -> dict[str, Any]:
     """Detect volume anomalies: spikes, dry-ups, accumulation/distribution."""
     try:
-        df = _completed_candles(df)
+        df = _completed_candles(df, analyze_completed_only)
         volume = df["volume"] if "volume" in df.columns else df.get("Volume")
         close = df["close"] if "close" in df.columns else df["Close"]
 
         if volume is None or len(volume) < lookback + 1:
             return {"ratio": None, "trend": None, "anomaly": False, "type": None}
 
-        avg_volume = volume.rolling(window=lookback).mean().iloc[-1]
+        avg_volume = volume.iloc[-lookback-1:-1].mean()
         curr_volume = volume.iloc[-1]
-        ratio = curr_volume / avg_volume if avg_volume > 0 else 1.0
+        if not np.isfinite(avg_volume) or avg_volume <= 0 or not np.isfinite(curr_volume):
+            return {"ratio": None, "trend": None, "anomaly": False, "type": None}
+        ratio = curr_volume / avg_volume
 
         vol_sma_short = volume.rolling(5).mean().iloc[-1]
         vol_sma_long = volume.rolling(20).mean().iloc[-1]
@@ -295,37 +309,48 @@ def detect_volume_anomaly(df: pd.DataFrame, lookback: int = 20) -> dict[str, Any
         return {"ratio": None, "trend": None, "anomaly": False, "type": None}
 
 
-def extract_features(df: pd.DataFrame, symbol: str, market: str = "stock") -> SignalFeatures:
+def extract_features(
+    df: pd.DataFrame, symbol: str, market: str = "stock",
+    *, analyze_completed_only: bool = True,
+) -> SignalFeatures:
     """Extract all features for ML model and advanced filtering."""
-    df = _completed_candles(df)
+    df = _completed_candles(df, analyze_completed_only)
+    if df is None or df.empty:
+        return SignalFeatures(symbol=symbol, market=market)
     close = df["close"] if "close" in df.columns else df["Close"]
     high = df["high"] if "high" in df.columns else df["High"]
     low = df["low"] if "low" in df.columns else df["Low"]
 
-    adx_data = calculate_adx(df)
-    bb_data = calculate_bollinger_bands(df)
-    obv_data = calculate_obv(df)
-    vwap_dist = calculate_vwap_distance(df)
-    vol_data = detect_volume_anomaly(df)
-    regime, regime_score = detect_market_regime(df)
+    # The unfinished candle has already been removed once for every indicator.
+    adx_data = calculate_adx(df, analyze_completed_only=False)
+    bb_data = calculate_bollinger_bands(df, analyze_completed_only=False)
+    obv_data = calculate_obv(df, analyze_completed_only=False)
+    vwap_dist = calculate_vwap_distance(df, analyze_completed_only=False)
+    vol_data = detect_volume_anomaly(df, analyze_completed_only=False)
+    regime, regime_score = detect_market_regime(df, analyze_completed_only=False)
 
     rsi = None
     try:
         delta = close.diff()
         gain = delta.clip(lower=0).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
         loss = -delta.clip(upper=0).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-        rs = gain / loss
-        rsi = round(float((100 - 100/(1+rs)).iloc[-1]), 2)
+        rs = gain / loss.where(loss != 0)
+        rsi_values = (100 - 100/(1+rs)).mask((loss == 0) & (gain > 0), 100.0)
+        rsi_values = rsi_values.mask((loss == 0) & (gain == 0), 50.0)
+        rsi = _finite_float(rsi_values.iloc[-1])
     except Exception:
         pass
 
     macd_hist = None
+    macd_hist_pct = None
     try:
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
         macd = ema12 - ema26
         signal = macd.ewm(span=9, adjust=False).mean()
-        macd_hist = round(float((macd - signal).iloc[-1]), 4)
+        macd_hist = _finite_float((macd - signal).iloc[-1], 4)
+        if close.iloc[-1] > 0:
+            macd_hist_pct = _finite_float((macd - signal).iloc[-1] / close.iloc[-1] * 100, 6)
     except Exception:
         pass
 
@@ -337,23 +362,25 @@ def extract_features(df: pd.DataFrame, symbol: str, market: str = "stock") -> Si
         tr3 = (low - close.shift()).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr_val = tr.rolling(14).mean().iloc[-1]
-        atr = round(float(atr_val), 4)
-        atr_pct = round(atr_val / close.iloc[-1] * 100, 2)
+        atr = _finite_float(atr_val, 4)
+        if close.iloc[-1] > 0:
+            atr_pct = _finite_float(atr_val / close.iloc[-1] * 100)
     except Exception:
         pass
 
-    higher_highs = sum(1 for i in range(-10, -1) if high.iloc[i] > high.iloc[i-1])
-    lower_lows = sum(1 for i in range(-10, -1) if low.iloc[i] < low.iloc[i-1])
+    higher_highs = int(high.tail(11).diff().gt(0).sum())
+    lower_lows = int(low.tail(11).diff().lt(0).sum())
 
     return SignalFeatures(
         symbol=symbol,
         market=market,
-        timestamp=datetime.now(),
+        timestamp=df.index[-1].to_pydatetime() if isinstance(df.index, pd.DatetimeIndex) else datetime.now(),
         adx=adx_data["adx"],
         di_plus=adx_data["di_plus"],
         di_minus=adx_data["di_minus"],
         rsi=rsi,
         macd_hist=macd_hist,
+        macd_hist_pct=macd_hist_pct,
         atr=atr,
         atr_pct=atr_pct,
         bb_width=bb_data["bb_width"],
@@ -387,11 +414,11 @@ def score_signal_advanced(features: SignalFeatures, base_score: int, market: str
         reasons.append(f"⚡ Rejim: Yüksek Volatilite (skor -1)")
 
     if features.adx is not None:
-        if features.adx > 30 and features.di_plus and features.di_minus:
+        if features.adx > 30 and features.di_plus is not None and features.di_minus is not None:
             if features.di_plus > features.di_minus:
                 score += 1
                 reasons.append(f"📊 ADX: {features.adx:.0f} Güçlü Trend (+DI > -DI) (skor +1)")
-            else:
+            elif features.di_minus > features.di_plus:
                 score -= 1
                 reasons.append(f"📊 ADX: {features.adx:.0f} Güçlü Trend (-DI > +DI) (skor -1)")
         elif features.adx < 20:
@@ -421,10 +448,10 @@ def score_signal_advanced(features: SignalFeatures, base_score: int, market: str
             score -= 1
             reasons.append(f"📊 VWAP Üstünde %{features.vwap_distance:.1f} (skor -1)")
 
-    if features.obv_trend == "UP" and features.rsi and features.rsi < 50:
+    if features.obv_trend == "UP" and features.rsi is not None and features.rsi < 50:
         score += 1
         reasons.append(f"📈 OBV Yukarı + RSI < 50 (skor +1)")
-    elif features.obv_trend == "DOWN" and features.rsi and features.rsi > 50:
+    elif features.obv_trend == "DOWN" and features.rsi is not None and features.rsi > 50:
         score -= 1
         reasons.append(f"📉 OBV Aşağı + RSI > 50 (skor -1)")
 
