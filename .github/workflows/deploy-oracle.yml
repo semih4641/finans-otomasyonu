@@ -1,0 +1,119 @@
+name: Oracle Cloud'a dagit
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oracle-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Kodu al
+        uses: actions/checkout@v4
+
+      - name: Gerekli secret'lari denetle
+        shell: bash
+        env:
+          OCI_HOST: ${{ secrets.OCI_HOST }}
+          OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+          OCI_SSH_KNOWN_HOSTS: ${{ secrets.OCI_SSH_KNOWN_HOSTS }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          ACCOUNT_SIZE: ${{ secrets.ACCOUNT_SIZE }}
+        run: |
+          set -eu
+          missing=0
+          for name in OCI_HOST OCI_SSH_PRIVATE_KEY OCI_SSH_KNOWN_HOSTS BOT_TOKEN CHAT_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Eksik GitHub Actions secret: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: SSH'yi hazirla
+        shell: bash
+        env:
+          OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+          OCI_SSH_KNOWN_HOSTS: ${{ secrets.OCI_SSH_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$OCI_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$OCI_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+
+      - name: Sunucu ortam dosyasini olustur
+        shell: bash
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          ACCOUNT_SIZE: ${{ secrets.ACCOUNT_SIZE }}
+        run: |
+          set -eu
+          umask 077
+          {
+            printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN"
+            printf 'CHAT_ID=%s\n' "$CHAT_ID"
+            printf 'ACCOUNT_SIZE=%s\n' "$ACCOUNT_SIZE"
+            printf 'POSITION_RISK_PCT=1.0\n'
+            printf 'MAX_OPEN_POSITIONS=5\n'
+            printf 'DAILY_LOSS_LIMIT_PCT=2.0\n'
+            printf 'MAX_SECTOR_EXPOSURE_PCT=25.0\n'
+            printf 'MAX_CORRELATION_EXPOSURE_PCT=35.0\n'
+            printf 'MAX_PORTFOLIO_RISK_PCT=4.0\n'
+            printf 'MAX_DRAWDOWN_PCT=8.0\n'
+            printf 'CORRELATION_LOOKBACK_DAYS=60\n'
+            printf 'MIN_CORRELATION_THRESHOLD=0.7\n'
+          } > deployment.env
+
+      - name: Kodu Oracle VM'e aktar
+        shell: bash
+        env:
+          OCI_HOST: ${{ secrets.OCI_HOST }}
+        run: |
+          set -eu
+          ssh_options="-i $HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.env' \
+            --exclude 'runtime/' \
+            -e "ssh $ssh_options" \
+            ./ "ubuntu@$OCI_HOST:/opt/finans-otomasyonu/app/"
+          scp $ssh_options deployment.env \
+            "ubuntu@$OCI_HOST:/opt/finans-otomasyonu/.env.next"
+
+      - name: Botu yeniden kur ve baslat
+        shell: bash
+        env:
+          OCI_HOST: ${{ secrets.OCI_HOST }}
+        run: |
+          set -eu
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "ubuntu@$OCI_HOST" '
+              set -eu
+              mv /opt/finans-otomasyonu/.env.next /opt/finans-otomasyonu/.env
+              chmod 600 /opt/finans-otomasyonu/.env
+              cd /opt/finans-otomasyonu/app
+              if docker compose version >/dev/null 2>&1; then
+                docker compose up -d --build --remove-orphans
+                docker compose ps
+              else
+                docker-compose up -d --build --remove-orphans
+                docker-compose ps
+              fi
+              docker image prune -f
+            '

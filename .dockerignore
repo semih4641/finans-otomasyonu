@@ -1,0 +1,13 @@
+.git
+.github
+.env
+.venv
+__pycache__
+*.pyc
+*.log
+.pytest_cache
+backtest_out
+graphify-out
+runtime
+test_*.py
+deploy/ORACLE.md
