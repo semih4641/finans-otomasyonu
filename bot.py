@@ -152,6 +152,8 @@ def main() -> None:
         level=logging.INFO,
         handlers=[logging.StreamHandler(), logging.FileHandler("finans_bot.log", encoding="utf-8")],
     )
+    # httpx logs full Telegram API URLs, which contain the bot token.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     # Token kontrolü
     if not BOT_TOKEN:
         logger.error(
