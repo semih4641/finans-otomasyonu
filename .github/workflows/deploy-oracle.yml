@@ -27,14 +27,13 @@ jobs:
         env:
           OCI_HOST: ${{ secrets.OCI_HOST }}
           OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
-          OCI_SSH_KNOWN_HOSTS: ${{ secrets.OCI_SSH_KNOWN_HOSTS }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           ACCOUNT_SIZE: ${{ secrets.ACCOUNT_SIZE }}
         run: |
           set -eu
           missing=0
-          for name in OCI_HOST OCI_SSH_PRIVATE_KEY OCI_SSH_KNOWN_HOSTS BOT_TOKEN CHAT_ID; do
+          for name in OCI_HOST OCI_SSH_PRIVATE_KEY BOT_TOKEN CHAT_ID; do
             if [ -z "${!name:-}" ]; then
               echo "::error::Eksik GitHub Actions secret: $name"
               missing=1
@@ -45,13 +44,13 @@ jobs:
       - name: SSH'yi hazirla
         shell: bash
         env:
+          OCI_HOST: ${{ secrets.OCI_HOST }}
           OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
-          OCI_SSH_KNOWN_HOSTS: ${{ secrets.OCI_SSH_KNOWN_HOSTS }}
         run: |
           set -eu
           install -d -m 700 "$HOME/.ssh"
           printf '%s\n' "$OCI_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
-          printf '%s\n' "$OCI_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          ssh-keyscan -H "$OCI_HOST" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
 
       - name: Sunucu ortam dosyasini olustur
