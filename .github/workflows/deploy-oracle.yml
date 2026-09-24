@@ -84,12 +84,12 @@ jobs:
         run: |
           set -eu
           ssh_options="-i $HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
-          rsync -az --delete \
-            --exclude '.git/' \
-            --exclude '.env' \
-            --exclude 'runtime/' \
-            -e "ssh $ssh_options" \
-            ./ "ubuntu@$OCI_HOST:/opt/finans-otomasyonu/app/"
+          tar \
+            --exclude='./.git' \
+            --exclude='./.env' \
+            --exclude='./runtime' \
+            -czf - . | ssh $ssh_options "ubuntu@$OCI_HOST" \
+              'mkdir -p /opt/finans-otomasyonu/app && tar -xzf - -C /opt/finans-otomasyonu/app'
           scp $ssh_options deployment.env \
             "ubuntu@$OCI_HOST:/opt/finans-otomasyonu/.env.next"
 
