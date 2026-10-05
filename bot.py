@@ -170,7 +170,7 @@ def main() -> None:
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s", token=BOT_TOKEN,
     )
     handlers = [logging.StreamHandler(), RotatingFileHandler(
-        "finans_bot.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+        os.path.realpath("finans_bot.log"), maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
     )]
     for handler in handlers:
         handler.setFormatter(formatter)

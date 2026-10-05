@@ -1,0 +1,18 @@
+#cloud-config
+package_update: true
+packages:
+  - docker.io
+  - docker-compose
+  - rsync
+
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker ubuntu
+  - install -d -o ubuntu -g ubuntu -m 0750 /opt/finans-otomasyonu
+  - install -d -o ubuntu -g ubuntu -m 0750 /opt/finans-otomasyonu/app
+  - install -d -o ubuntu -g ubuntu -m 0700 /opt/finans-otomasyonu/runtime
+  - install -d -o ubuntu -g ubuntu -m 0700 /opt/finans-otomasyonu/runtime/backtest_out
+  - install -d -o ubuntu -g ubuntu -m 0700 /opt/finans-otomasyonu/runtime/models/bist_v2
+  - printf '{}\n' > /opt/finans-otomasyonu/runtime/signal_state.json
+  - chown -R ubuntu:ubuntu /opt/finans-otomasyonu
+  - chown -R 1000:1000 /opt/finans-otomasyonu/runtime
