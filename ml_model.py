@@ -25,7 +25,7 @@ from sklearn.utils.validation import check_is_fitted
 
 from signals_advanced import SignalFeatures, MarketRegime, extract_features
 from market_data import completed_candles, fetch_bist_history
-from paper import COST_RATE, HORIZON_BARS
+from paper import COST_RATE, HORIZON_BARS, settlement_prices
 
 logger = logging.getLogger(__name__)
 
@@ -517,18 +517,21 @@ def build_bist_samples(df, symbol, signal_fn, *, lookback_days=1825, horizon=BIS
         if not setup.get("signals"):
             continue
         future = df.iloc[i:i+horizon]
+        try:
+            prices = settlement_prices(future)
+        except ValueError:
+            continue
         entry = float(future["open"].iloc[0] if "open" in future else window["close"].iloc[-1])
         sl, tp1, tp2 = (float(setup[key]) for key in ("sl", "tp1", "tp2"))
-        prices = future[["high", "low", "close"]].to_numpy(dtype=float)
-        if (not np.isfinite([entry, sl, tp1, tp2]).all() or not 0 < sl < entry < tp1 <= tp2
-                or not np.isfinite(prices).all() or (prices <= 0).any()
-                or (prices[:, 0] < prices[:, 1]).any()):
+        if not np.isfinite([entry, sl, tp1, tp2]).all() or not 0 < sl < entry < tp1 <= tp2:
             continue
         label, exit_price, bars_held = 0, float(future["close"].iloc[-1]), horizon
         outcome = "MTM-TIMEOUT"
-        for offset, (high, low, _) in enumerate(prices):
+        for offset, bar in enumerate(prices):
+            low, high = bar[:2]
             if low <= sl:
-                exit_price, bars_held, outcome = sl, offset + 1, "SL"
+                stop_fill = min(sl, bar[3]) if len(bar) > 3 else sl
+                exit_price, bars_held, outcome = stop_fill, offset + 1, "SL"
                 break
             if high >= tp1:
                 label, bars_held = 1, offset + 1

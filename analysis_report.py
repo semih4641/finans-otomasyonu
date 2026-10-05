@@ -8,6 +8,7 @@ import pandas as pd
 from indicators import calculate_rsi, calculate_macd
 from market_data import BIST_TIMEZONE, completed_bist_daily
 from signal_engine import detect_buy_signals
+from signal_safety import validated_ohlcv
 
 
 def build_stock_report(data: dict, now=None) -> str:
@@ -18,15 +19,7 @@ def build_stock_report(data: dict, now=None) -> str:
     current = current.tz_localize(BIST_TIMEZONE) if current.tzinfo is None else current.tz_convert(BIST_TIMEZONE)
     try:
         frame = completed_bist_daily(data["history_df"], current)
-        frame = frame.rename(columns=lambda value: str(value).lower())
-        if frame.empty:
-            raise ValueError("Tamamlanmış günlük mum bulunamadı.")
-        prices = frame[["open", "high", "low", "close"]].tail(201).apply(pd.to_numeric, errors="coerce")
-        if (not prices.apply(lambda column: column.map(lambda value: math.isfinite(value) and value > 0)).all().all()
-                or (prices["low"] > prices[["open", "close"]].min(axis=1)).any()
-                or (prices["high"] < prices[["open", "close"]].max(axis=1)).any()):
-            raise ValueError("Fiyat geçmişinde eksik veya tutarsız mumlar var.")
-        frame[prices.columns] = frame[prices.columns].apply(pd.to_numeric, errors="coerce")
+        frame = validated_ohlcv(frame)
     except (ValueError, TypeError, KeyError, AttributeError):
         return heading + "\n\nVeri kontrolü geçilemedi. Geçerli ve tamamlanmış fiyat geçmişi olmadan analiz üretilemiyor. Daha sonra tekrar deneyin."
 
@@ -47,7 +40,23 @@ def build_stock_report(data: dict, now=None) -> str:
         return "\n".join(lines)
 
     # Passing the completed frame prevents indicators from discarding another bar.
-    result = detect_buy_signals(frame, market="stock", symbol=symbol)
+    result = detect_buy_signals(frame, market="stock", symbol=symbol, now=current)
+    safety = result.get("safety", {})
+    lines.extend(["", "<b>Veri ve hareket kontrolü</b>"])
+    if safety.get("blocked"):
+        lines.append("⚠️ Koruma kontrolü sinyali durdurdu.")
+        lines.extend("• " + escape(str(reason)) for reason in safety.get("reasons", []))
+    elif safety:
+        lines.append("Tanımlı veri ve aşırı fiyat-hacim kontrollerinde engel bulunmadı.")
+    lines.extend("• " + escape(str(reason)) for reason in safety.get("warnings", []))
+    if safety.get("metrics"):
+        metrics = safety["metrics"]
+        lines.append(f"Hacim / önceki 20 mum medyanı: {metrics['volume_ratio']:.1f}x; "
+                     f"kapanış değişimi: %{metrics['change_pct']:.1f}.")
+    lines.append("Bu kontrol manipülasyonu kanıtlamaz veya güvenli yatırım garantisi vermez.")
+    if "STALE_DATA" in safety.get("codes", []):
+        lines.append("Güncel veri gelene kadar teknik gösterge ve hedef üretilmedi.")
+        return "\n".join(lines)
     rsi = calculate_rsi(frame)
     macd = calculate_macd(frame)
     lines.extend(["", "<b>Göstergeler ne söylüyor?</b>"])

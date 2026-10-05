@@ -87,6 +87,23 @@ class PaperSettlementTests(unittest.TestCase):
         self.assertEqual(row["outcome"], "SL")
         self.assertEqual(row["exit_price"], 90)
 
+    def test_stop_gap_fills_at_open_and_charges_costs_on_actual_exit(self):
+        data = frame(2)
+        data["open"] = 100.0
+        data.loc[data.index[1], ["open", "low", "high", "close"]] = [80, 79, 85, 82]
+        row = paper.settle_one(position(), data)
+        self.assertEqual(row["outcome"], "SL")
+        self.assertEqual(row["exit_price"], 80)
+        self.assertEqual(row["bars_held"], 2)
+        self.assertAlmostEqual(row["net_pnl_amount"], -202.7)
+        self.assertAlmostEqual(row["net_pnl_pct"], (80 * 0.9985 / (100 * 1.0015) - 1) * 100, places=3)
+
+    def test_intrabar_stop_keeps_stop_fill_when_open_is_above_stop(self):
+        data = frame(1)
+        data["open"] = 100.0
+        data.loc[data.index[0], "low"] = 85
+        self.assertEqual(paper.settle_one(position(), data)["exit_price"], 90)
+
     def test_settlement_persists_actual_cash_profit_after_both_fees(self):
         data = frame(1)
         data.iloc[0] = [99, 111, 110]
@@ -122,6 +139,18 @@ class PaperSettlementTests(unittest.TestCase):
             paper.settle_one(position(), frame().iloc[::-1])
         with self.assertRaises(ValueError):
             paper.settle_one(position(entry=0), frame())
+
+    def test_close_and_optional_open_must_be_inside_the_candle(self):
+        for column, invalid in (("close", 1000), ("close", 98),
+                                ("open", 102), ("open", 98),
+                                ("open", float("nan")), ("open", float("inf")),
+                                ("open", 0), ("open", -1)):
+            data = frame()
+            if column == "open":
+                data["open"] = 100.0
+            data.loc[data.index[-1], column] = invalid
+            with self.subTest(column=column, invalid=invalid), self.assertRaises(ValueError):
+                paper.settle_one(position(), data)
 
 
 class PaperLedgerTests(unittest.TestCase):
@@ -220,6 +249,16 @@ class PaperLedgerTests(unittest.TestCase):
         self.assertEqual(paper._load_open(), [position()])
         self.assertFalse(paper.SETTLED_CSV.exists())
 
+    def test_invalid_entry_candle_does_not_fill_or_remove_pending_position(self):
+        pending = pending_position()
+        paper._save_open([pending])
+        data = bist_frame(opening=105, high=104, low=103, close=104)
+        with patch.object(paper, "fetch_frame_async", new=AsyncMock(return_value=data)):
+            self.assertEqual(asyncio.run(paper.settle_signals()), 1)
+        self.assertEqual(paper._load_open(), [pending])
+        self.assertFalse(paper.SETTLED_CSV.exists())
+        self.assertFalse((self.base / "live_cancelled.json").exists())
+
     def test_new_bist_setup_is_pending_and_requires_decision_candle(self):
         signal = {"key": "hisse:TEST.IS", "market": "stock", "entry_num": 100,
                   "sl": 90, "tp1": 110, "tp2": 120, "quantity": 10}
@@ -280,7 +319,8 @@ class PaperLedgerTests(unittest.TestCase):
         for opening in (89, 90, 110, 115):
             with self.subTest(opening=opening):
                 paper._save_open([pending_position()])
-                with patch.object(paper, "fetch_frame_async", new=AsyncMock(return_value=bist_frame(opening=opening))):
+                data = bist_frame(opening=opening, high=max(106, opening), low=min(104, opening))
+                with patch.object(paper, "fetch_frame_async", new=AsyncMock(return_value=data)):
                     self.assertEqual(asyncio.run(paper.settle_signals()), 0)
                 self.assertFalse(paper.SETTLED_CSV.exists())
                 self.assertEqual(paper._load_cancelled()[0]["reason"], "invalid_entry_gap")
@@ -296,7 +336,7 @@ class PaperLedgerTests(unittest.TestCase):
 
     def test_cancelled_entry_recovers_after_audit_commit_without_fetching_again(self):
         paper._save_open([pending_position()])
-        with patch.object(paper, "fetch_frame_async", new=AsyncMock(return_value=bist_frame(opening=115))), \
+        with patch.object(paper, "fetch_frame_async", new=AsyncMock(return_value=bist_frame(opening=115, high=116))), \
              patch.object(paper, "_save_open", side_effect=OSError("simulated crash")):
             with self.assertRaises(OSError):
                 asyncio.run(paper.settle_signals())

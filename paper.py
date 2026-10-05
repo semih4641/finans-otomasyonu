@@ -319,6 +319,25 @@ def _bist_timestamp(value) -> pd.Timestamp:
     return timestamp.tz_localize(BIST_TIMEZONE) if timestamp.tzinfo is None else timestamp.tz_convert(BIST_TIMEZONE)
 
 
+def settlement_prices(df: pd.DataFrame) -> np.ndarray:
+    """Validate outcome bars, returning low/high/close and optional open prices.
+
+    Legacy histories may omit open. If supplied, it must be a valid price
+    inside the candle, just like close; it is never silently substituted.
+    """
+    columns = ["low", "high", "close"] + (["open"] if "open" in df.columns else [])
+    try:
+        prices = df[columns].to_numpy(dtype=float)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Sonuç verisi sayısal OHLC fiyatları içermeli.") from exc
+    if (not np.isfinite(prices).all() or (prices <= 0).any()
+            or (prices[:, 0] > prices[:, 1]).any()
+            or (prices[:, 2:] < prices[:, 0, None]).any()
+            or (prices[:, 2:] > prices[:, 1, None]).any()):
+        raise ValueError("Sonuç verisi sonlu, pozitif ve tutarlı OHLC fiyatları içermeli.")
+    return prices
+
+
 def _resolve_pending_entry(pos: dict, df: pd.DataFrame) -> tuple[dict | None, str | None]:
     """Resolve a daily opening only after its bar completes, without backdating.
 
@@ -339,6 +358,7 @@ def _resolve_pending_entry(pos: dict, df: pd.DataFrame) -> tuple[dict | None, st
     start = candidates[0]
     if _bist_timestamp(pos["opened_at"]).date() >= dates[start]:
         return None, "missed_entry"
+    settlement_prices(df.iloc[start:start + 1])
     entry = float(df["open"].iloc[start])
     sl, tp1, tp2 = (float(pos[key]) for key in ("sl", "tp1", "tp2"))
     if not all(math.isfinite(value) and value > 0 for value in (entry, sl, tp1, tp2)):
@@ -420,19 +440,20 @@ def settle_one(pos: dict, df: pd.DataFrame) -> dict | None:
         return None
 
     end = min(n, start + horizon)
-    lows, highs, closes = df["low"], df["high"], df["close"]
-    values = df.iloc[start:end][["low", "high", "close"]].to_numpy(dtype=float)
-    if not np.isfinite(values).all() or (values <= 0).any() or (values[:, 0] > values[:, 1]).any():
-        raise ValueError("Paper verisi sonlu ve pozitif OHLC fiyatları içermeli.")
+    prices = settlement_prices(df.iloc[start:end])
     outcome, exit_price, exit_bar = ("MTM-TIMEOUT", None, None)
 
-    for j in range(start, end):
-        if lows.iloc[j] <= sl:
-            outcome, exit_price, exit_bar = "SL", sl, j
+    for offset, bar in enumerate(prices):
+        low, high = bar[:2]
+        j = start + offset
+        if low <= sl:
+            # A stop cannot fill above an opening gap that already crossed it.
+            stop_fill = min(sl, bar[3]) if len(bar) > 3 else sl
+            outcome, exit_price, exit_bar = "SL", stop_fill, j
             break
-        if highs.iloc[j] >= tp1:
+        if high >= tp1:
             outcome, exit_price, exit_bar = (
-                ("TP2", tp2, j) if highs.iloc[j] >= tp2
+                ("TP2", tp2, j) if high >= tp2
                 else ("TP1", tp1, j)
             )
             break
@@ -440,7 +461,7 @@ def settle_one(pos: dict, df: pd.DataFrame) -> dict | None:
     if outcome == "MTM-TIMEOUT":
         if n - start < horizon:
             return None
-        exit_price = float(closes.iloc[end - 1])
+        exit_price = float(prices[-1, 2])
         exit_bar = end - 1
 
     gross = (exit_price / entry - 1.0) * 100

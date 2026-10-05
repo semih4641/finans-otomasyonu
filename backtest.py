@@ -35,6 +35,7 @@ import pandas as pd
 from bot import BIST_ONLY, SCAN_STOCKS, SCAN_CRYPTO
 from data_fetcher import CRYPTO_EXCHANGES
 from market_data import completed_bist_daily
+from paper import settlement_prices
 from signal_engine import detect_buy_signals, _signal_category
 
 # Walk-forward binlerce bastırma kararı üretir; rapor gürültüsünü engelle
@@ -159,7 +160,7 @@ def walk_forward(df: pd.DataFrame, cooldown_bars: int, market: str = "stock") ->
             last_fire[c] = decision_idx
 
         entry_idx = decision_idx + 1
-        if "open" in df.columns and pd.notna(df["open"].iloc[entry_idx]):
+        if "open" in df.columns:
             entry_price = float(df["open"].iloc[entry_idx])
         else:
             # Bazı veri kaynakları OHLC içinde open sağlamaz; eski close
@@ -194,7 +195,6 @@ def evaluate(events: list, df: pd.DataFrame, horizon: int, cost_rate: float = 0.
         raise ValueError("Sonuç penceresi pozitif bir tam sayı olmalı.")
     _validate_cost_rate(cost_rate)
     trades = []
-    lows, highs, closes = df["low"], df["high"], df["close"]
     n = len(df)
 
     for ev in events:
@@ -211,16 +211,20 @@ def evaluate(events: list, df: pd.DataFrame, horizon: int, cost_rate: float = 0.
         if start + horizon > n:
             continue
         end = start + horizon
+        prices = settlement_prices(df.iloc[start:end])
         outcome, exit_price, exit_bar = "TIMEOUT", None, None
 
-        for j in range(start, end):
+        for offset, bar in enumerate(prices):
+            low, high = bar[:2]
+            j = start + offset
             # Muhafazakâr sıra: aynı mumda SL ve TP birlikte görülürse SL.
-            if lows.iloc[j] <= ev["sl"]:
-                outcome, exit_price, exit_bar = "SL", ev["sl"], j
+            if low <= ev["sl"]:
+                stop_fill = min(ev["sl"], bar[3]) if len(bar) > 3 else ev["sl"]
+                outcome, exit_price, exit_bar = "SL", stop_fill, j
                 break
-            if highs.iloc[j] >= ev["tp1"]:
+            if high >= ev["tp1"]:
                 # Aynı pencerede TP2'ye de uzandı mı?
-                if highs.iloc[j] >= ev["tp2"]:
+                if high >= ev["tp2"]:
                     outcome, exit_price, exit_bar = "TP2", ev["tp2"], j
                 else:
                     outcome, exit_price, exit_bar = "TP1", ev["tp1"], j
@@ -229,7 +233,7 @@ def evaluate(events: list, df: pd.DataFrame, horizon: int, cost_rate: float = 0.
         # Sonuçsuz kurulumları pencere sonu kapanışıyla mark-to-market et
         mtm = False
         if outcome == "TIMEOUT" and end - 1 >= start:
-            exit_price = float(closes.iloc[end - 1])
+            exit_price = float(prices[-1, 2])
             exit_bar = end - 1
             mtm = True
 

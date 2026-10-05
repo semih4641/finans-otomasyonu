@@ -11,7 +11,9 @@ import os
 import sys
 import logging
 import math
+import re
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 # Handlers import this module by name. Script startup must share that same
 # module, otherwise Python creates a second configuration/portfolio instance.
@@ -145,13 +147,40 @@ from signal_engine import (
 # ============================================================================
 # 4. ANA ÇALIŞTIRMA DÖNGÜSÜ
 # ============================================================================
+class TelegramRedactingFormatter(logging.Formatter):
+    """Remove bot credentials from messages and exception tracebacks."""
+
+    def __init__(self, *args, token=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.token = token
+
+    def format(self, record):
+        rendered = super().format(record)
+        if self.token:
+            rendered = rendered.replace(self.token, "[REDACTED]")
+        return re.sub(
+            r"(https?://api\.telegram\.org/(?:file/)?bot)[^/\s?#]+",
+            r"\1[REDACTED]", rendered, flags=re.IGNORECASE,
+        )
+
+
 def main() -> None:
     """Bot uygulamasını ayağa kaldıran ana fonksiyon."""
-    logging.basicConfig(
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        level=logging.INFO,
-        handlers=[logging.StreamHandler(), logging.FileHandler("finans_bot.log", encoding="utf-8")],
+    formatter = TelegramRedactingFormatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s", token=BOT_TOKEN,
     )
+    handlers = [logging.StreamHandler(), RotatingFileHandler(
+        "finans_bot.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )]
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=handlers,
+    )
+    # HTTPX includes the Bot API token in INFO request URLs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     # Token kontrolü
     if not BOT_TOKEN:
         logger.error(

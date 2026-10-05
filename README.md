@@ -19,6 +19,8 @@ Mevcut `.env` dosyasının üzerine yazmayın. `BOT_TOKEN` ve `CHAT_ID` değerle
 doldurun. Risk hesabı için `ACCOUNT_SIZE` gerekir; boş bırakıldığında miktar
 üretilmez ve portföy kontrolleri açıkken otomatik yeni pozisyon kabul edilmez.
 Diğer risk sınırları `.env.example` içinde açıklanmıştır.
+`CHAT_ID` boşsa korunan komutlar çalışmaz; `/chatid` ile kendi sohbet kimliğinizi
+öğrenebilirsiniz. Grup kimliği seçilirse yetki o gruptaki komutlara verilir.
 
 ```powershell
 python bot.py
@@ -49,9 +51,43 @@ komutları kullanılabilir; BIST modeli bu verilere uygulanmaz.
 gösterir. RSI/MACD değerleri kısa açıklamalarla sunulur; teknik kurulum yoksa
 neden sağlanmadığı, varsa hangi koşulların oluştuğu ve stop/hedef seviyeleri
 yazılır. Anlık fiyat ile analizin dayandığı kapanış birbirine karıştırılmaz.
-Eksik veya tutarsız OHLC verisinde analiz üretilmez. Eski mumların takvim yaşı
-açıkça gösterilir; tatil ile veri gecikmesi otomatik olarak ayırt edilmez.
+Eksik veya tutarsız OHLCV verisinde analiz üretilmez. Eski mumların takvim yaşı
+açıkça gösterilir; son günlük mum varsayılan 7 takvim günü sınırını aşmışsa
+güncel gösterge ve sinyal üretilmez. Tatil ile veri gecikmesi otomatik olarak
+ayırt edilmez. Tek hisselik `/sinyal THYAO.IS` komutu da aynı açıklamalı raporu verir.
 Bu rapor şirket haberlerini ve finansal tabloları değerlendirmez.
+
+## Veri ve aşırı hareket kontrolü
+
+Sinyal motoru, manuel tarama, otomatik tarama ve tarihsel testlerde ortak veri
+kontrolünü kullanır. Tamamlanmış mumlarda OHLC fiyatları sonlu ve pozitif,
+açılış/kapanış düşük-yüksek aralığında, hacim sonlu ve negatif olmayan bir sayı
+olmalıdır. Eksik alanlar doldurularak sinyal üretilmez. Son mumda sıfır hacim veya
+günlük hissede önceki 20 mumun medyan hacminin sıfır olması da yeni sinyali durdurur.
+
+Günlük hisse verisinde son hacim **önceki 20 mumun medyanının en az 5 katı** ve
+kapanış değişiminin mutlak değeri **en az %6** veya mumun yüksek-düşük aralığı
+önceki kapanışa göre **en az %8** ise sinyal engellenir. Fiyat/aralık koşulu,
+hacim koşuluyla birlikte aranır. Yalnız hacim sıçraması uyarı olarak gösterilir.
+Bu günlük eşikler saatlik kripto verisine uygulanmaz. Ayarlar `.env.example`
+içindedir; geçersiz eşik girilirse kontrol sessizce kapanmak yerine sinyali durdurur.
+
+Bu başlangıç eşikleri ölçülmüş bir başarı iddiası veya manipülasyon tespiti
+değildir. Meşru haber kaynaklı hareketleri de durdurabilir; gerçek manipülasyonu
+kaçırabilir. Kontroller [Borsa İstanbul'un resmi tedbirlerinin](https://www.borsaistanbul.com/piyasalar/pay-piyasasi/piyasa-isleyisi)
+yerine geçmez. Henüz KAP/haber bağlantısı veya resmi tedbir listesi entegrasyonu yoktur.
+
+`/hisse` ve tek hisselik `/sinyal` raporları engellenme nedenini gösterir.
+Otomatik taramada değerlendirmeye gelen engellenmiş hisse için Telegram koruma
+uyarısı gönderilir; yeni sanal işlem açılmaz. Aynı sembol, mum ve neden için
+24 saat tekrar uyarı gönderilmez. Gönderim başarısızsa sonraki tarama yeniden dener.
+Güncel olmayan günlük BIST mumları otomatik taramada zaten işlem adayı yapılmaz.
+
+Canlı komutlarda saatlik kripto mumları için varsayılan güncellik sınırı 3 saat,
+günlük hisseler için 7 takvim günüdür. Bunlar tam bir seans/tatil takvimi değildir.
+Tarihsel testler duvar saatine göre eskilik kontrolü yapmaz; yalnız o karar anına
+kadar olan mumları kullanır. Sonraki mumları değiştirmenin eski kararı etkilememesi
+regresyon testleriyle kontrol edilir.
 
 `/start` mesajında da hisse düğmeleri bulunur. Menü, `SCAN_STOCKS` listesinden
 otomatik oluşturulur; 12 hisse içeren sayfalarda önceki/sonraki düğmeleriyle
@@ -107,6 +143,7 @@ Son ölçüm ve etkin ayarlar [BIST_ANALIZ.md](BIST_ANALIZ.md) içinde açıklan
 | `signals_advanced.py` | İndikatörler ve piyasa rejimi özellikleri |
 | `ml_model.py` | Özellik kodlama, zaman sıralı eğitim ve model saklama |
 | `market_data.py` | BIST günlük kapanış verisi ve tamamlanmış mum kontrolü |
+| `signal_safety.py` | Ortak OHLCV doğrulama, güncellik ve aşırı fiyat-hacim kontrolü |
 | `train_bist.py` | BIST eğitim komutu ve bağımsız dönem karşılaştırması |
 | `risk.py` | Pozisyon büyüklüğü, açık pozisyon ve günlük zarar sınırları |
 | `portfolio_risk.py` | Toplam risk, sektör, korelasyon ve düşüş sınırları |
@@ -126,6 +163,12 @@ limitleri, CSV uyumluluğu ve işlem vadesi için regresyon kontrolleri içerir.
 Gerçek komut satırı giriş noktaları, güncellenmiş portföyün kullanılması,
 model paketinin yeniden yüklenmesi ve eğitim/backtest/sanal işlemin aynı
 sentetik fiyatlarda aynı sonucu üretmesi de kontrol edilir.
+
+Yeni güvenlik regresyonları bozuk OHLCV, eksik hacim, eski/gelecek tarih, tamamlanmamış
+mum, fiyat-hacim sıçraması, uyarı tekrarı ve eksik sohbet yetkisini kapsar.
+Log çıktılarında Telegram tokenleri maskelenir; ana log dosyası yaklaşık 5 MiB
+olunca döndürülür ve üç yedek tutulur. Önceden yazılmış loglar geriye dönük silinmez
+veya temizlenmez; döndürülen log dosyaları da Git dışında tutulur.
 
 ## Bu incelemede düzeltilenler
 
@@ -150,6 +193,17 @@ sentetik fiyatlarda aynı sonucu üretmesi de kontrol edilir.
   scikit-learn eksik bağımlılıkları eklendi.
 
 ## Hesapların sınırları ve sonraki geliştirmeler
+
+Stop seviyesinin altına açılış boşluğu oluşursa sanal işlem, backtest ve yeni
+eğitim örneklerinde çıkış fiyatı açılışa düşürülür. Örneğin stop 90 iken sonraki
+mum 80'den açılırsa hesap 90 yerine 80 üzerinden yapılır. Bu hâlâ bir simülasyondur;
+gerçek emir defteri, tabanda alıcı bulunamaması ve likidite kayması modellenmez.
+Eski ve açılış sütunu bulunmayan veri için stop seviyesindeki eski davranış korunur.
+Tutarsız sonuç mumlarıyla kâr/zarar yazılmaz; canlı kayıtlarda pozisyon korunarak
+yeniden değerlendirme beklenir. Mevcut işlem kayıtları yeniden yazılmamıştır.
+Yeni sinyal koruması ve açılış boşluğu hesabı strateji sonuçlarını değiştirebilir;
+eski model puanları ve eski başarı ölçümleri bu sürümün doğrulanması sayılmaz.
+Kaydedilmiş model otomatik yeniden eğitilmez.
 
 `/portfoy` hesap değeri gerçekleşmiş parasal sonuçları kullanır; açık
 pozisyonların anlık değerlemesini içermez. Eski miktarsız kayıtların parasal

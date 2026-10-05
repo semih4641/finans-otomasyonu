@@ -103,6 +103,26 @@ class EvaluationTests(unittest.TestCase):
         self.assertLess(trade["net_pnl_pct"], -10.0)
         self.assertEqual(trade["bars_held"], 1)
 
+    def test_stop_gap_uses_open_with_costs_and_legacy_history_still_uses_stop(self):
+        data = bars(3)
+        data.loc[2, ["open", "low", "high", "close"]] = [80, 79, 85, 82]
+        trade = backtest.evaluate([event()], data, horizon=2, cost_rate=0.0015)[0]
+        self.assertEqual(trade["outcome"], "SL")
+        self.assertEqual(trade["pnl_pct"], -20)
+        self.assertEqual(trade["bars_held"], 2)
+        self.assertAlmostEqual(trade["net_pnl_pct"], round((80 * 0.9985 / (100 * 1.0015) - 1) * 100, 3))
+        legacy = backtest.evaluate([event()], data.drop(columns="open"), horizon=2)[0]
+        self.assertEqual(legacy["pnl_pct"], -10)
+
+    def test_corrupt_outcome_prices_are_rejected(self):
+        for column, invalid in (("close", 1000), ("close", 94), ("open", 106),
+                                ("open", 94), ("open", float("nan")),
+                                ("open", float("inf")), ("low", -1)):
+            data = bars(3)
+            data.loc[2, column] = invalid
+            with self.subTest(column=column, invalid=invalid), self.assertRaises(ValueError):
+                backtest.evaluate([event()], data, horizon=2)
+
     def test_timeout_marks_window_close_with_both_costs(self):
         data = bars(4)
         data.loc[2, "close"] = 104

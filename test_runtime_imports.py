@@ -61,7 +61,7 @@ class RuntimeImportTests(unittest.TestCase):
 
             with patch("dotenv.load_dotenv"), \
                     patch.dict(os.environ, {"BOT_TOKEN": "offline-fixture"}, clear=True), \
-                    patch("logging.basicConfig"), patch("logging.FileHandler"), \
+                    patch("logging.basicConfig"), patch("logging.handlers.RotatingFileHandler"), \
                     patch("telegram.ext.Application.builder", side_effect=inspect_builder), \
                     patch("socket.socket.connect", side_effect=AssertionError("Network forbidden")):
                 try:

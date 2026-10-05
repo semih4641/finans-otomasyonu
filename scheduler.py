@@ -7,6 +7,7 @@ temettü kontrolleri ve paper trading değerlendirmesi.
 
 import asyncio
 import logging
+from html import escape
 from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -90,6 +91,8 @@ async def scheduled_check(app) -> None:
     buy_signal_items = []
     pending_cooldown = []  # (sembol_anahtarı, sinyaller) — gönderim sonrası cooldown'a sokulur
     div_alert_keys = []  # gönderilen temettü uyarılarının cooldown anahtarları
+    safety_alerts = []
+    safety_alert_keys = []
     logger.info("🔄 Zamanlayıcı: AL sinyali taraması başlıyor...")
 
     # Update portfolio state before checking signals
@@ -113,7 +116,8 @@ async def scheduled_check(app) -> None:
             if f"kripto:{symbol}" in reserved_symbols:
                 continue
 
-            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto", symbol=symbol)
+            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto", symbol=symbol,
+                                            now=datetime.now(ZoneInfo("UTC")))
             # Cooldown'da olan sinyaller eleilir — aynı uyarı tekrar spam yapmaz
             signals = filter_cooldown(f"kripto:{symbol}", sig_result["signals"])
             if not signals:
@@ -193,7 +197,16 @@ async def scheduled_check(app) -> None:
             scan_portfolio.price_data[actual_ticker] = history
             if f"hisse:{actual_ticker}" in reserved_symbols:
                 continue
-            sig_result = detect_buy_signals(history, market="stock", symbol=actual_ticker)
+            sig_result = detect_buy_signals(history, market="stock", symbol=actual_ticker, now=scan_time)
+            safety = sig_result.get("safety", {})
+            if safety.get("blocked"):
+                # One warning per symbol/candle/code within the regular cooldown.
+                key = f"safety:{actual_ticker}:{history.index[-1]}:{','.join(safety.get('codes', []))}"
+                if not _cooldown_active(key):
+                    reason = " ".join(safety.get("reasons", []))
+                    safety_alerts.append(f"• <b>{escape(actual_ticker)}</b>: {escape(reason)}")
+                    safety_alert_keys.append(key)
+                continue
             signals = filter_cooldown(f"hisse:{actual_ticker}", sig_result["signals"])
             if not signals:
                 continue
@@ -335,5 +348,15 @@ async def scheduled_check(app) -> None:
         except Exception as e:
             logger.error(f"❌ Uyarı gönderilemedi: {e}")
 
-    if not buy_signal_items and not alerts:
+    if safety_alerts:
+        message = ("🛡️ <b>SİNYAL KORUMA UYARISI</b>\n\n" + "\n\n".join(safety_alerts)
+                   + "\n\nBu adaylar için yeni sanal işlem açılmadı. "
+                   "Bu kontrol manipülasyon kanıtı değildir.")
+        try:
+            await send_long_message(app.bot, CHAT_ID, message)
+            _cooldown_mark(safety_alert_keys)
+        except Exception as exc:
+            logger.error("Koruma uyarısı gönderilemedi: %s", exc)
+
+    if not buy_signal_items and not alerts and not safety_alerts:
         logger.info("✅ Tarama tamamlandı, sinyal/uyarı yok.")

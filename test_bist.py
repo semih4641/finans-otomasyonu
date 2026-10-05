@@ -71,6 +71,44 @@ class BistTests(unittest.TestCase):
         self.assertEqual(len(completed_candles(result)), 2)
         self.assertEqual(indicators.calculate_rsi(result), None)
 
+    def test_training_backtest_and_paper_agree_on_gap_through_existing_stop(self):
+        data = daily_bars(204)
+        data[["open", "close"]] = 100.0
+        data["low"], data["high"] = 99.0, 101.0
+        data.loc[data.index[202], ["open", "low", "high", "close"]] = [80, 79, 85, 82]
+        data.attrs["completed_only"] = True
+        setup = {"signals": ["candidate"], "sl": 90, "tp1": 110, "tp2": 120}
+        groups = ml_model.build_bist_samples(data, "TEST.IS", Mock(return_value=setup), horizon=3)
+        samples = [row for group in groups.values() for row in group]
+        self.assertEqual(len(samples), 1)
+        pos = {**setup, "symbol": "hisse:TEST.IS", "market": "stock", "entry": 100,
+               "opened_at": data.index[201].isoformat(), "quantity": 10}
+        with patch.dict(paper.HORIZON_BARS, stock=3):
+            settled = paper.settle_one(pos, data)
+        event = {**setup, "entry": 100, "decision_idx": 200, "entry_idx": 201,
+                 "score": 3, "trend": "BOGA", "rr": 2, "categories": ["candidate"]}
+        historical = backtest.evaluate([event], data, horizon=3, cost_rate=paper.COST_RATE)[0]
+        for result in (samples[0], settled, historical):
+            self.assertEqual(result["outcome"], "SL")
+            self.assertEqual(result["bars_held"], 2)
+            self.assertAlmostEqual(result["net_pnl_pct"], settled["net_pnl_pct"], places=3)
+        self.assertEqual(samples[0]["exit_price"], 80)
+        self.assertEqual(samples[0]["label"], 0)
+        self.assertEqual(settled["exit_price"], 80)
+
+    def test_training_rejects_outcome_bars_with_invalid_close_or_open(self):
+        setup = {"signals": ["candidate"], "sl": 90, "tp1": 110, "tp2": 120}
+        for column, invalid in (("close", 1000), ("close", 98), ("open", 102),
+                                ("open", 98), ("open", float("nan")), ("open", float("inf"))):
+            data = daily_bars(204)
+            data[["open", "close"]] = 100.0
+            data["low"], data["high"] = 99.0, 101.0
+            data.attrs["completed_only"] = True
+            data.loc[data.index[202], column] = invalid
+            groups = ml_model.build_bist_samples(data, "TEST.IS", Mock(return_value=setup), horizon=3)
+            with self.subTest(column=column, invalid=invalid):
+                self.assertEqual(sum(map(len, groups.values())), 0)
+
     def test_latest_closed_day_is_used_after_close_and_on_weekend(self):
         data = daily_bars(5)
         for moment in ("2024-01-05T18:20:00+03:00", "2024-01-06T12:00:00+03:00"):

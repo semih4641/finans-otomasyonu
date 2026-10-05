@@ -41,8 +41,17 @@ def authorized(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from bot import CHAT_ID
-        if CHAT_ID and str(update.effective_chat.id) != str(CHAT_ID):
-            logger.warning(f"⛔ Yetkisiz erişim denemesi: chat_id={update.effective_chat.id}")
+        configured_chat = str(CHAT_ID).strip() if CHAT_ID is not None else ""
+        if not configured_chat:
+            guidance = "Bot henüz yapılandırılmadı. /chatid ile sohbet kimliğini öğrenip .env dosyasındaki CHAT_ID alanını ayarlayın."
+            if getattr(update, "callback_query", None):
+                await update.callback_query.answer(guidance, show_alert=True)
+            elif getattr(update, "effective_message", None):
+                await update.effective_message.reply_text(guidance)
+            return
+        chat = getattr(update, "effective_chat", None)
+        if chat is None or str(chat.id) != configured_chat:
+            logger.warning("⛔ Yetkisiz erişim denemesi: chat_id=%s", getattr(chat, "id", None))
             if getattr(update, "callback_query", None):
                 await update.callback_query.answer("Bu menüye erişim yetkiniz yok.", show_alert=True)
             return
@@ -237,12 +246,12 @@ async def kripto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     symbol = context.args[0].upper()
     pair = f"{symbol}/USDT"
 
-    await msg.reply_text(f"⏳ <i>{pair} verisi çekiliyor...</i>", parse_mode="HTML")
+    await msg.reply_text(f"⏳ <i>{escape(pair)} verisi çekiliyor...</i>", parse_mode="HTML")
 
     data = await fetch_crypto_data(pair)
     if data is None:
         await msg.reply_text(
-            f"❌ <b>{pair}</b> verisi çekilemedi.\n"
+            f"❌ <b>{escape(pair)}</b> verisi çekilemedi.\n"
             "Sembolü kontrol edin (örn: BTC, ETH, DOT).",
             parse_mode="HTML",
         )
@@ -256,7 +265,7 @@ async def kripto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     rsi_status = get_rsi_status(rsi)
 
     message = (
-        f"🪙 <b>{pair}</b>\n"
+        f"🪙 <b>{escape(pair)}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💵 <b>Fiyat:</b> ${price:,.4f}\n\n"
         f"📊 <b>Teknik İndikatörler</b>\n"
@@ -336,7 +345,7 @@ async def _send_stock_info(msg, ticker):
         market_cap_str = f"{market_cap:,.0f}"
 
     message = (
-        f"📈 <b>{company_name} ({ticker})</b>\n"
+        f"📈 <b>{escape(str(company_name))} ({escape(ticker)})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💵 <b>Fiyat:</b> {price:,.2f} {currency}\n"
         f"📉 <b>Gün Aralığı:</b> {day_low:,.2f} — {day_high:,.2f}\n"
@@ -377,13 +386,13 @@ async def temettu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ticker = context.args[0].upper()
 
     await msg.reply_text(
-        f"⏳ <i>{ticker} temettü bilgileri çekiliyor...</i>", parse_mode="HTML"
+        f"⏳ <i>{escape(ticker)} temettü bilgileri çekiliyor...</i>", parse_mode="HTML"
     )
 
     data = await fetch_dividend_data_async(ticker)
     if data is None:
         await msg.reply_text(
-            f"❌ <b>{ticker}</b> temettü verisi çekilemedi.",
+            f"❌ <b>{escape(ticker)}</b> temettü verisi çekilemedi.",
             parse_mode="HTML",
         )
         return
@@ -395,7 +404,7 @@ async def temettu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     company_name = info.get("shortName", ticker)
 
     message = (
-        f"💰 <b>{company_name} ({ticker}) — Temettü Bilgileri</b>\n"
+        f"💰 <b>{escape(str(company_name))} ({escape(ticker)}) — Temettü Bilgileri</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
@@ -483,26 +492,31 @@ async def sinyal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if context.args:
         ticker = context.args[0].upper()
         await msg.reply_text(
-            f"🔍 <i>{ticker} AL sinyali analiz ediliyor...</i>", parse_mode="HTML"
+            f"🔍 <i>{escape(ticker)} AL sinyali analiz ediliyor...</i>", parse_mode="HTML"
         )
         stock_data = await fetch_stock_data_async(ticker)
         if stock_data is None:
             await msg.reply_text(
-                f"❌ <b>{ticker}</b> verisi çekilemedi.", parse_mode="HTML"
+                f"❌ <b>{escape(ticker)}</b> verisi çekilemedi.", parse_mode="HTML"
             )
             return
 
         actual_ticker = stock_data.get("ticker", ticker)
-        sig_result = detect_buy_signals(stock_data["history_df"], market="stock", symbol=actual_ticker)
+        if str(actual_ticker).upper().endswith(".IS"):
+            from analysis_report import build_stock_report
+            await send_long_message(msg, None, build_stock_report({**stock_data, "ticker": actual_ticker}))
+            return
+        sig_result = detect_buy_signals(stock_data["history_df"], market="stock", symbol=actual_ticker,
+                                        now=pd.Timestamp.now(tz="UTC"))
         signals = sig_result["signals"]
         rsi = calculate_rsi(stock_data["history_df"])
         macd = calculate_macd(stock_data["history_df"])
         company = stock_data["info"].get("shortName", actual_ticker)
 
         message = (
-            f"🔍 <b>{company} ({actual_ticker}) — Sinyal Analizi</b>\n"
+            f"🔍 <b>{escape(str(company))} ({escape(str(actual_ticker))}) — Sinyal Analizi</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"💵 Fiyat: <b>{stock_data['price']:,.2f}</b>\n"
+            f"💵 Referans kapanış: <b>{sig_result.get('reference_price', stock_data['price']):,.2f}</b>\n"
             f"📊 RSI: <b>{rsi}</b> — {get_rsi_status(rsi)}\n"
         )
         if macd:
@@ -541,12 +555,13 @@ async def sinyal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if data is None:
                 continue
 
-            sig_result = detect_buy_signals(data["history_df"], market="stock", symbol=ticker)
+            sig_result = detect_buy_signals(data["history_df"], market="stock", symbol=ticker,
+                                            now=pd.Timestamp.now(tz="UTC"))
             signals = sig_result["signals"]
             if signals:
                 actual_ticker = data.get("ticker", ticker)
                 name = data["info"].get("shortName", actual_ticker)
-                price = data["price"]
+                price = sig_result.get("reference_price", data["price"])
                 rsi = calculate_rsi(data["history_df"])
                 buy_signals.append({
                     "name": f"📈 {name} ({actual_ticker})",
@@ -572,8 +587,8 @@ async def sinyal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Sinyal bulunan: <b>{len(buy_signals)}</b>\n\n"
         )
         for item in buy_signals:
-            message += f"<b>{item['name']}</b>\n"
-            message += f"  💵 Fiyat: {item['price']} | RSI: {item['rsi']}\n"
+            message += f"<b>{escape(str(item['name']))}</b>\n"
+            message += f"  💵 Referans kapanış: {item['price']} | RSI: {item['rsi']}\n"
             for s in item["signals"]:
                 message += f"  {s}\n"
             message += f"  ⏱️ Vade: {item['vade']} | 🛑 SL: {item['sl']:,.2f} | ✅ TP1: {item['tp1']:,.2f} | ✅ TP2: {item['tp2']:,.2f}\n"
@@ -617,7 +632,8 @@ async def kriptosinyal_command(update: Update, context: ContextTypes.DEFAULT_TYP
             if data is None:
                 continue
 
-            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto", symbol=symbol)
+            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto", symbol=symbol,
+                                            now=pd.Timestamp.now(tz="UTC"))
             signals = sig_result["signals"]
             if signals:
                 rsi = calculate_rsi(data["ohlcv_df"])
@@ -645,7 +661,7 @@ async def kriptosinyal_command(update: Update, context: ContextTypes.DEFAULT_TYP
             f"Sinyal bulunan: <b>{len(buy_signals)}</b>\n\n"
         )
         for item in buy_signals:
-            message += f"<b>{item['name']}</b>\n"
+            message += f"<b>{escape(str(item['name']))}</b>\n"
             message += f"  💵 Fiyat: {item['price']} | RSI: {item['rsi']}\n"
             for s in item["signals"]:
                 message += f"  {s}\n"
@@ -690,7 +706,8 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if data is None:
                 continue
 
-            sig_result = detect_buy_signals(data["history_df"], market="stock", symbol=ticker)
+            sig_result = detect_buy_signals(data["history_df"], market="stock", symbol=ticker,
+                                            now=pd.Timestamp.now(tz="UTC"))
             signals = sig_result["signals"]
             if signals:
                 actual_ticker = data.get("ticker", ticker)
@@ -698,7 +715,7 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 rsi = calculate_rsi(data["history_df"])
                 buy_signals_stock.append({
                     "name": f"📈 {name} ({actual_ticker})",
-                    "price": f"{data['price']:,.2f}",
+                    "price": f"{sig_result.get('reference_price', data['price']):,.2f}",
                     "rsi": rsi,
                     "signals": signals,
                     "vade": sig_result["vade"],
@@ -720,7 +737,8 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if data is None:
                 continue
 
-            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto", symbol=symbol)
+            sig_result = detect_buy_signals(data["ohlcv_df"], market="crypto", symbol=symbol,
+                                            now=pd.Timestamp.now(tz="UTC"))
             signals = sig_result["signals"]
             if signals:
                 rsi = calculate_rsi(data["ohlcv_df"])
@@ -751,8 +769,8 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if buy_signals_stock:
         message += "📊 <b>HİSSE SENETLERİ:</b>\n"
         for item in buy_signals_stock:
-            message += f"<b>{item['name']}</b>\n"
-            message += f"  💵 Fiyat: {item['price']} | RSI: {item['rsi']}\n"
+            message += f"<b>{escape(str(item['name']))}</b>\n"
+            message += f"  💵 Referans kapanış: {item['price']} | RSI: {item['rsi']}\n"
             for s in item["signals"]:
                 message += f"  {s}\n"
             message += f"  ⏱️ Vade: {item['vade']} | 🛑 SL: {item['sl']:,.2f} | ✅ TP1: {item['tp1']:,.2f} | ✅ TP2: {item['tp2']:,.2f}\n"
@@ -764,7 +782,7 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if buy_signals_crypto:
         message += "🪙 <b>KRİPTOLAR:</b>\n"
         for item in buy_signals_crypto:
-            message += f"<b>{item['name']}</b>\n"
+            message += f"<b>{escape(str(item['name']))}</b>\n"
             message += f"  💵 Fiyat: {item['price']} | RSI: {item['rsi']}\n"
             for s in item["signals"]:
                 message += f"  {s}\n"

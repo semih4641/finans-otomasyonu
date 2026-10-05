@@ -16,6 +16,8 @@ from indicators import _completed_candles, _rsi_series
 from signals_advanced import extract_features, generate_advanced_signals, SignalFeatures
 from ml_model import RegimeAwareModelEnsemble
 from risk import calculate_position_risk, format_position_risk
+from market_data import completed_bist_daily
+from signal_safety import validated_ohlcv, assess_signal_safety
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +192,7 @@ def sizing_hint(entry: float, sl: float) -> str:
 # ============================================================================
 # AL SİNYALİ TESPİT MOTORU
 # ============================================================================
-def detect_buy_signals(df: pd.DataFrame, market: str = "stock", symbol: str = "", *, use_ml: bool | None = None) -> dict:
+def detect_buy_signals(df: pd.DataFrame, market: str = "stock", symbol: str = "", *, use_ml: bool | None = None, now=None) -> dict:
     """
     Fiyat verisinden AL sinyallerini tespit eder (Gelişmiş: ADX, Volume Profile, Regime, ML).
 
@@ -210,6 +212,7 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock", symbol: str = ""
         df: OHLCV DataFrame
         market: "stock" | "crypto"
         symbol: Sembol adı (ML scoring için)
+        now: Canlı veri güncellik kontrolünün zamanı; tarihsel testler vermez.
 
     Returns:
         dict: {"signals", "tp1", "tp2", "sl", "vade", "score", "trend", "rr", "ml_score", "regime", "features"}
@@ -218,24 +221,35 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock", symbol: str = ""
     """
     signals = []
     base_signals = []
+    empty_result = {"signals": [], "tp1": 0.0, "tp2": 0.0, "sl": 0.0, "vade": "",
+                    "score": 0, "trend": "", "rr": None, "ml_score": 0.5,
+                    "ml_available": False, "regime": "UNKNOWN", "features": None}
     try:
-        close = df["close"] if "close" in df.columns else df["Close"]
-        volume = df["volume"] if "volume" in df.columns else df.get("Volume")
-
-        # Yalnızca kapanmış mumlar üzerinden analiz
-        completed = _completed_candles(df)
+        # Live BIST data uses its actual daily close rather than discarding the
+        # last row blindly. Historical callers already mark completion.
+        completed = (completed_bist_daily(df, now) if now is not None and market == "stock"
+                     and symbol.upper().endswith(".IS") else _completed_candles(df))
+        completed = validated_ohlcv(completed)
+        safety = assess_signal_safety(completed, market, now=now)
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        reason = "Veri kontrolü geçilemedi: " + str(exc)
+        return {**empty_result, "decision_reason": reason,
+                "safety": {"blocked": True, "codes": ["INVALID_DATA"], "reasons": [reason],
+                           "warnings": [], "metrics": {}}}
+    if safety["blocked"]:
+        return {**empty_result, "decision_reason": " ".join(safety["reasons"]), "safety": safety}
+    if len(completed) < 30:
+        return {**empty_result, "safety": safety,
+                "decision_reason": "En az 30 geçerli kapanış gerekli; veri yetersiz veya geçersiz."}
+    # All features share the same normalized candles and completion marker.
+    df = completed
+    try:
         close = completed["close"] if "close" in completed.columns else completed["Close"]
         volume = (
             completed["volume"]
             if "volume" in completed.columns
             else completed.get("Volume")
         )
-
-        if (len(close) < 30 or not pd.to_numeric(close.tail(30), errors="coerce").map(
-                lambda value: pd.notna(value) and math.isfinite(value) and value > 0).all()):
-            return {"signals": [], "tp1": 0.0, "tp2": 0.0, "sl": 0.0, "vade": "",
-                    "score": 0, "trend": "", "rr": None, "ml_score": 0.5, "regime": "UNKNOWN", "features": None,
-                    "decision_reason": "En az 30 geçerli kapanış gerekli; veri yetersiz veya geçersiz."}
 
         # --- 1. RSI Aşırı Satım Toparlanması ---
         rsi = _rsi_series(close)
@@ -293,6 +307,7 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock", symbol: str = ""
         return {"signals": [], "tp1": 0.0, "tp2": 0.0, "sl": 0.0, "vade": "",
                 "score": 0, "trend": "", "rr": None, "ml_score": 0.5,
                 "ml_available": False, "regime": "UNKNOWN", "features": None,
+                "safety": safety,
                 "decision_reason": "Veri analiz edilemedi; teknik değerlendirme üretilemedi."}
 
     # --- Gelişmiş Özellikler ve ML Scoring ---
@@ -335,6 +350,9 @@ def detect_buy_signals(df: pd.DataFrame, market: str = "stock", symbol: str = ""
         "score_reasons": score_reasons,
         "regime": regime,
         "features": features,
+        "safety": safety,
+        "reference_price": float(completed["close"].iloc[-1]),
+        "candle_time": completed.index[-1].isoformat(),
         "decision_reason": "Temel teknik koşullarda yeni bir sinyal oluşmadı.",
     }
 

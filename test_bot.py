@@ -198,13 +198,13 @@ class AsyncIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ledger = Path(directory) / "settled.csv"
             pd.DataFrame([{"closed_at": datetime.now().isoformat(),
                            "net_pnl_amount": -250}]).to_csv(ledger, index=False)
-            with patch.object(bot, "CHAT_ID", None), \
+            with patch.object(bot, "CHAT_ID", "offline"), \
                  patch.object(bot, "_portfolio_state", PortfolioState([], 1, 2, -1, 1)), \
                  patch.object(bot, "get_risk_config", return_value=RiskConfig(account_size=10000)), \
                  patch.object(paper, "SETTLED_CSV", ledger), \
                  patch.object(paper, "_load_open", return_value=[]):
                 await telegram_handlers.portfoy_command(
-                    SimpleNamespace(effective_message=message), SimpleNamespace())
+                    SimpleNamespace(effective_message=message, effective_chat=SimpleNamespace(id="offline")), SimpleNamespace())
         text = message.reply_text.await_args.args[0]
         self.assertIn("Hesap Değeri: 9,750.00", text)
         self.assertIn("En Yüksek Hesap Değeri: 10,000.00", text)
@@ -231,13 +231,13 @@ class AsyncIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 {"closed_at": "2025-01-02", "entry": 100, "quantity": 1, "net_pnl_pct": 5},
                 {"closed_at": "2025-01-01", "entry": 100, "quantity": 5, "net_pnl_pct": -10},
             ]).to_csv(ledger, index=False)
-            with patch.object(bot, "CHAT_ID", None), patch.object(paper, "SETTLED_CSV", ledger), \
+            with patch.object(bot, "CHAT_ID", "offline"), patch.object(paper, "SETTLED_CSV", ledger), \
                  patch("risk.get_risk_config", return_value=RiskConfig(account_size=1000)), \
                  patch.object(plt, "subplots", side_effect=capture_chart), \
                  warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="Glyph .* missing from font")
                 await telegram_handlers.grafik_command(
-                    SimpleNamespace(effective_message=message), SimpleNamespace())
+                    SimpleNamespace(effective_message=message, effective_chat=SimpleNamespace(id="offline")), SimpleNamespace())
         message.reply_photo.assert_awaited_once()
         self.assertTrue(message.reply_photo.await_args.kwargs["photo"].getvalue().startswith(b"\x89PNG"))
         _, (equity_axis, drawdown_axis) = charts[0]
@@ -339,9 +339,9 @@ class AsyncIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ensemble = SimpleNamespace(train=Mock(side_effect=train))
         collect = AsyncMock(return_value={MarketRegime.UNKNOWN: [{"label": 1}]})
         message = SimpleNamespace(reply_text=AsyncMock())
-        with patch("ml_model.prepare_training_data", collect), \
+        with patch.object(bot, "CHAT_ID", "offline"), patch("ml_model.prepare_training_data", collect), \
              patch("ml_model.RegimeAwareModelEnsemble", return_value=ensemble):
-            await telegram_handlers.mltrain_command(SimpleNamespace(effective_message=message), SimpleNamespace(args=["quick"]))
+            await telegram_handlers.mltrain_command(SimpleNamespace(effective_message=message, effective_chat=SimpleNamespace(id="offline")), SimpleNamespace(args=["quick"]))
         self.assertEqual(collect.await_count, 1)
         self.assertTrue(all(symbol.endswith(".IS") for symbol in collect.await_args.args[0]))
         self.assertIs(signal_engine._ml_ensemble, ensemble)
@@ -353,9 +353,9 @@ class AsyncIntegrationTests(unittest.IsolatedAsyncioTestCase):
         old = object()
         signal_engine._ml_ensemble = old
         message = SimpleNamespace(reply_text=AsyncMock())
-        with patch("ml_model.prepare_training_data", AsyncMock(return_value={})), \
+        with patch.object(bot, "CHAT_ID", "offline"), patch("ml_model.prepare_training_data", AsyncMock(return_value={})), \
              patch("ml_model.RegimeAwareModelEnsemble", return_value=SimpleNamespace(train=Mock(return_value={}))):
-            await telegram_handlers.mltrain_command(SimpleNamespace(effective_message=message), SimpleNamespace(args=[]))
+            await telegram_handlers.mltrain_command(SimpleNamespace(effective_message=message, effective_chat=SimpleNamespace(id="offline")), SimpleNamespace(args=[]))
         self.assertIs(signal_engine._ml_ensemble, old)
         self.assertFalse(signal_engine._ml_training_active)
 
