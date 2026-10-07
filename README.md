@@ -51,6 +51,9 @@ komutları kullanılabilir; BIST modeli bu verilere uygulanmaz.
 | `/portfoy` | Sanal hesap ve pozisyon riskleri |
 | `/grafik` | Gerçekleşmiş parasal sonuçlarla hesap değeri ve düşüş grafiği |
 | `/mltrain quick`, `/mltrain` | Hızlı veya tam model eğitimi |
+| `/haber ASELS`, `/haber` | Hisseye özel veya genel son KAP açıklamaları |
+| `/haberogren ASELS`, `/haberogren` | Haber kategorilerinin geçmiş fiyat gözlemleri |
+| `/kapdurum` | KAP veri ve ölçüm durumu (yalnız bot sahibi) |
 | `/izle`, `/help`, `/chatid` | İzleme listeleri ve yardım |
 
 `/hisse` BIST raporu, analizde kullanılan kapanış fiyatını ve mum tarihini
@@ -62,6 +65,48 @@ açıkça gösterilir; son günlük mum varsayılan 7 takvim günü sınırını
 güncel gösterge ve sinyal üretilmez. Tatil ile veri gecikmesi otomatik olarak
 ayırt edilmez. Tek hisselik `/sinyal THYAO.IS` komutu da aynı açıklamalı raporu verir.
 Bu rapor şirket haberlerini ve finansal tabloları değerlendirmez.
+
+## KAP takibi ve haberlerden öğrenme
+
+`KAP_ENABLED=true` (varsayılan) ile bot, KAP'ın herkese açık bildirim listesini
+30 dakikada bir kontrol eder. `SCAN_STOCKS` içindeki hisseler, bildirimin hisse
+ve ilgili hisse kodlarıyla tam eşleştirilir. İlk çalışmada son 7 takvim günü
+sessizce arşivlenir; sonraki yeni açıklamalar yalnız bot sahibine bildirilir.
+Bir döngüde en fazla 10 bildirim gönderilir; kalanlar sıradaki döngüye kalır.
+Başarısız gönderimler tekrar denenir; gönderim ile kayıt arasındaki ani kapanma
+tek bir bildirimin tekrarına yol açabilir. Ek yetkili kullanıcılar haber ve
+öğrenme komutlarını kullanabilir, otomatik haber alıcısını değiştiremez.
+
+Başlık ve KAP'ın resmi kısa özeti, kaynak bağlantısıyla gösterilir. Tam metin
+ve PDF ekleri okunmaz; başlık/özetteki anahtar kelimelerle konu sınıflandırması
+yapılır. Bu sınıflandırma duygu analizi veya olumlu/olumsuz yatırım kararı değildir.
+Bu erişim lisanslı API değildir ve sitenin değişmesiyle kesilebilir. Sürekli
+kapsamlı arşiv erişimi için [KAP'ın resmi veri servisi koşulları](https://www.kap.org.tr/tr/api/about/content-file/8a019492945fbe080194b26d8bed4873)
+ayrıca değerlendirilmelidir. Bu özellik ücretli API veya LLM çağrısı yapmaz.
+
+"Öğrenme" ilk sürümde tahmin modeli değil, kalıcı tarihsel gözlem arşividir:
+
+- Her 6 saatte fiyatlar kontrol edilir; yayından **sonraki seansın açılışından**
+  1, 5 ve 20. seans kapanışına kadar düzeltilmiş fiyat değişimi ölçülür.
+- Tamamlanmamış seanslar, eksik sonuç pencereleri, düzeltme/ilişkili bildirimler
+  ve sonradan değişen metinler istatistiklere alınmaz.
+- Aynı hisse ve ufukta örtüşen pencereler, kategoriler farklı olsa bile tekrar
+  sayılmaz. Kategori başına en az 10 örtüşmeyen örnek olduğunda medyan değişim
+  ve pozitif sonuç oranı gösterilir. Bu eşik istatistiksel güven garantisi değildir.
+- Tarihler eşleşiyorsa BIST 100'e göre fark da hesaplanır. Veri hatasında
+  eski kayıtlar korunur ve eksiklik raporda belirtilir.
+
+İlk kurulum geçmiş yılları öğrenmiş sayılmaz: son 7 günle başlar ve zamanla
+birikir. Uzun kesintilerde 7 günden eski eksik bildirimler tamamlanmaz; arşiv
+boşluğu görünür tutulur. Mevcut takip listesi seçilim yanlılığı taşır; sonuçlar
+nedensellik, yatırım getirisi veya gelecekteki başarı kanıtı değildir. İşlem
+maliyeti/kayma ve yayın günündeki ilk fiyat tepkisi bu ölçümde yoktur.
+Bu özellik teknik AL/SAT sinyallerini ve mevcut ML modelini değiştirmez.
+
+Kayıtlar `BOT_DATA_DIR/kap_news.sqlite3` dosyasında tutulur (yerelde varsayılan
+`backtest_out`, Docker'da kalıcı `/data`). Güncellemelerde korunur; yedeklere
+bu dosyayı da dahil edin. `KAP_ENABLED=false` takibi ve otomatik ölçümü durdurur,
+kayıtlı arşiv komutlarla okunmaya devam eder.
 
 ## Veri ve aşırı hareket kontrolü
 
@@ -81,7 +126,8 @@ içindedir; geçersiz eşik girilirse kontrol sessizce kapanmak yerine sinyali d
 Bu başlangıç eşikleri ölçülmüş bir başarı iddiası veya manipülasyon tespiti
 değildir. Meşru haber kaynaklı hareketleri de durdurabilir; gerçek manipülasyonu
 kaçırabilir. Kontroller [Borsa İstanbul'un resmi tedbirlerinin](https://www.borsaistanbul.com/piyasalar/pay-piyasasi/piyasa-isleyisi)
-yerine geçmez. Henüz KAP/haber bağlantısı veya resmi tedbir listesi entegrasyonu yoktur.
+yerine geçmez. KAP haber takibi ayrı bir bilgi katmanıdır; resmi tedbir listesi
+henüz işlem engelleme kurallarına bağlanmamıştır.
 
 `/hisse` ve tek hisselik `/sinyal` raporları engellenme nedenini gösterir.
 Otomatik taramada değerlendirmeye gelen engellenmiş hisse için Telegram koruma

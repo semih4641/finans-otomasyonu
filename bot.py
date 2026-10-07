@@ -12,7 +12,7 @@ import sys
 import logging
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
 # Handlers import this module by name. Script startup must share that same
@@ -198,9 +198,11 @@ def main() -> None:
         izle_command, performans_command,
         sinyal_command, kriptosinyal_command, tamtara_command,
         mltrain_command, portfoy_command, grafik_command,
-        hisseler_command, stock_menu_callback
+        hisseler_command, stock_menu_callback,
+        haber_command, haberogren_command, kapdurum_command,
     )
     from scheduler import scheduled_check
+    from news_service import scheduled_news_check
 
     # Application oluştur
     app = Application.builder().token(BOT_TOKEN).build()
@@ -222,6 +224,9 @@ def main() -> None:
     app.add_handler(CommandHandler("mltrain", mltrain_command, block=False))
     app.add_handler(CommandHandler("portfoy", portfoy_command))
     app.add_handler(CommandHandler("grafik", grafik_command))
+    app.add_handler(CommandHandler("haber", haber_command))
+    app.add_handler(CommandHandler("haberogren", haberogren_command))
+    app.add_handler(CommandHandler("kapdurum", kapdurum_command))
 
     # Arka plan zamanlayıcısını hazırla
     scheduler = AsyncIOScheduler()
@@ -237,6 +242,13 @@ def main() -> None:
     )
 
     # Bot komutları menüsünü ayarla ve scheduler'ı başlat
+    scheduler.add_job(
+        scheduled_news_check, trigger=IntervalTrigger(minutes=30), args=[app],
+        id="kap_news_check", name="KAP Haber Takibi", replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.now().astimezone() + timedelta(seconds=15),
+    )
+
     async def post_init(application: Application) -> None:
         await application.bot.set_my_commands([
             BotCommand("start", "Botu başlat"),
@@ -244,6 +256,9 @@ def main() -> None:
             BotCommand("kripto", "Kripto fiyat ve analiz (örn: /kripto BTC)"),
             BotCommand("hisseler", "Hisse kodlarından seçerek analiz aç"),
             BotCommand("hisse", "Hisse menüsü veya analiz (örn: /hisse THYAO.IS)"),
+            BotCommand("haber", "KAP açıklamaları (örn: /haber ASELS)"),
+            BotCommand("haberogren", "Haber sonrası geçmiş fiyat gözlemleri"),
+            BotCommand("kapdurum", "KAP takip durumu (bot sahibi)"),
             BotCommand("temettu", "Temettü bilgileri (örn: /temettu AAPL)"),
             BotCommand("sinyal", "Hisse AL sinyali tara"),
             BotCommand("kriptosinyal", "Kripto AL sinyali tara"),

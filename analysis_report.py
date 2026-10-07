@@ -93,4 +93,5 @@ def build_stock_report(data: dict, now=None) -> str:
     lines.extend(["", "<b>Takip edilecekler</b>",
                   "Bir sonraki kapanışta koşulların sürüp sürmediğini ve şirketin yeni açıklamalarını kontrol edin.",
                   "Bu rapor günlük fiyat/hacim verisini yorumlar; şirket haberleri ve finansal tablolar bu değerlendirmeye dahil değildir."])
+    lines.append(f"KAP başlık ve özetleri: /haber {escape(symbol.removesuffix('.IS'))}")
     return "\n".join(lines)

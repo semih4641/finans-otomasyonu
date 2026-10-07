@@ -65,6 +65,65 @@ def authorized(func=None, *, owner_only=False):
     return wrapper
 
 
+def _news_symbol(context):
+    from bot import SCAN_STOCKS
+    if not context.args:
+        return None
+    symbol = context.args[0].upper()
+    if not symbol.endswith(".IS"):
+        symbol += ".IS"
+    if symbol not in SCAN_STOCKS:
+        raise ValueError("Takip listesindeki bir hisseyi yazın. Örnek: /haber ASELS · Liste: /hisseler")
+    return symbol
+
+
+@authorized
+async def haber_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot import SCAN_STOCKS
+    from kap_news import NewsStore, refresh_news, render_news
+    try:
+        symbol = _news_symbol(context)
+    except ValueError as exc:
+        await update.effective_message.reply_text(str(exc))
+        return
+    store = NewsStore()
+    await refresh_news(SCAN_STOCKS, store=store)
+    await send_long_message(update.effective_message, None, render_news(store, symbol))
+
+
+@authorized
+async def haberogren_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from kap_news import NewsStore
+    from news_learning import render_learning
+    try:
+        symbol = _news_symbol(context)
+    except ValueError as exc:
+        await update.effective_message.reply_text(str(exc))
+        return
+    await send_long_message(update.effective_message, None, render_learning(NewsStore(), symbol))
+
+
+@authorized(owner_only=True)
+async def kapdurum_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from kap_news import NewsStore, news_enabled
+    store = NewsStore()
+    state = store.state()
+    lines = ["📰 <b>KAP takip durumu</b>", "Takip: " + ("açık" if news_enabled() else "kapalı"),
+             "Sorgu: en fazla 30 dakikada bir · Fiyat gözlemi: 6 saatte bir",
+             "Akış: resmi sitenin herkese açık listesi; lisanslı API bağlantısı değil."]
+    for key, label in (("last_success", "Son başarılı haber kontrolü"),
+                       ("last_learning", "Son fiyat ölçümü"), ("coverage_start", "Arşiv başlangıcı"),
+                       ("last_error", "Akış sorunu"), ("learning_warning", "Ölçüm notu"),
+                       ("coverage_gap", "Arşiv boşluğu")):
+        if state.get(key):
+            value = state[key]
+            if key in {"last_success", "last_learning"}:
+                value = datetime.fromisoformat(value).strftime("%d.%m.%Y %H:%M (İstanbul)")
+            lines.append(f"{label}: {escape(value)}")
+    lines.append(f"Gönderim bekleyen: {len(store.latest(limit=10000, pending=True))}")
+    await send_long_message(update.effective_message, None, "\n".join(lines))
+
+
 # ============================================================================
 # MESAJ BÖLME YARDIMCISI (Telegram 4096 karakter limiti)
 # ============================================================================
@@ -132,6 +191,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  /hisseler → Hisse kodlarına dokunarak analiz aç\n"
         "  /hisse THYAO.IS →  Açıklamalı günlük hisse analizi\n"
         "  /hisse ASELS.IS →  Veri tarihi, göstergeler ve teknik seviyeler\n\n"
+        "📰 <b>KAP ve Haber Gözlemleri</b>\n"
+        "  /haber ASELS → Resmi açıklama başlıkları ve özetleri\n"
+        "  /haberogren ASELS → Haber sonrası geçmiş fiyat davranışı\n"
+        "  /kapdurum → Haber akışının durumu (bot sahibi)\n\n"
         "💰 <b>Temettü Komutları</b>\n"
         "  /temettu AAPL  →  Apple temettü bilgileri\n"
         "  /temettu MSFT  →  Microsoft temettü bilgileri\n\n"
