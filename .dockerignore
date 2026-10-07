@@ -1,6 +1,7 @@
 .git
 .github
 .env
+authorized_chats.json
 deployment.env
 .venv
 __pycache__

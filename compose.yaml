@@ -9,6 +9,7 @@ services:
       - ../.env
     environment:
       TZ: Europe/Istanbul
+      BOT_DATA_DIR: /data
     volumes:
       - ../runtime:/data
     logging:

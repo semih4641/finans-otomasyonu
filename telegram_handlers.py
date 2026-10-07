@@ -23,6 +23,7 @@ from data_fetcher import fetch_crypto_data, fetch_stock_data_async, fetch_divide
 from signal_engine import detect_buy_signals, sizing_hint, format_ml_score
 from risk import calculate_position_risk
 from portfolio_risk import calculate_portfolio_metrics
+from access_control import additional_chat_ids
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,14 @@ logger = logging.getLogger(__name__)
 TELEGRAM_MAX_LENGTH = 4000  # 96 karakter güvenlik payı (limit: 4096)
 
 
-def authorized(func):
+def authorized(func=None, *, owner_only=False):
     """CHAT_ID kontrolü — yalnızca yetkili kullanıcı komut çalıştırabilir.
 
     /start, /help ve /chatid herkese açıktır; diğer tüm komutlar
-    yalnızca .env'deki CHAT_ID'ye sahip kullanıcıya yanıt verir.
+    sahibine ve analiz için izin verilen ek sohbetlere yanıt verir.
     """
+    if func is None:
+        return lambda handler: authorized(handler, owner_only=owner_only)
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from bot import CHAT_ID
@@ -50,7 +53,10 @@ def authorized(func):
                 await update.effective_message.reply_text(guidance)
             return
         chat = getattr(update, "effective_chat", None)
-        if chat is None or str(chat.id) != configured_chat:
+        allowed = {configured_chat}
+        if not owner_only:
+            allowed.update(additional_chat_ids())
+        if chat is None or str(chat.id) not in allowed:
             logger.warning("⛔ Yetkisiz erişim denemesi: chat_id=%s", getattr(chat, "id", None))
             if getattr(update, "callback_query", None):
                 await update.callback_query.answer("Bu menüye erişim yetkiniz yok.", show_alert=True)
@@ -467,7 +473,7 @@ async def izle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ============================================================================
 # PERFORMANS KOMUTU (/performans)
 # ============================================================================
-@authorized
+@authorized(owner_only=True)
 async def performans_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/performans komutu — canlı paper-trading istatistiklerini gösterir."""
     msg = update.effective_message
@@ -799,7 +805,7 @@ async def tamtara_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ============================================================================
 # ML MODEL EĞİTİM KOMUTU (/mltrain)
 # ============================================================================
-@authorized
+@authorized(owner_only=True)
 async def mltrain_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /mltrain komutu — ML modellerini geçmiş veriyle eğitir.
@@ -864,7 +870,7 @@ async def mltrain_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ============================================================================
 # PORTFÖY DURUM KOMUTU (/portfoy)
 # ============================================================================
-@authorized
+@authorized(owner_only=True)
 async def portfoy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/portfoy komutu — mevcut portföy risk metriklerini gösterir."""
     import bot
@@ -901,7 +907,7 @@ async def portfoy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ============================================================================
 # EQUİTY CURVE GRAFİK KOMUTU (/grafik)
 # ============================================================================
-@authorized
+@authorized(owner_only=True)
 async def grafik_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/grafik komutu — equity curve grafiğini Telegram'a resim olarak gönderir."""
     import paper

@@ -1,5 +1,6 @@
 # Sırlar
 .env
+authorized_chats.json
 
 # Loglar ve çalışma zamanı çıktıları
 *.log

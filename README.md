@@ -21,6 +21,12 @@ doldurun. Risk hesabı için `ACCOUNT_SIZE` gerekir; boş bırakıldığında mi
 Diğer risk sınırları `.env.example` içinde açıklanmıştır.
 `CHAT_ID` boşsa korunan komutlar çalışmaz; `/chatid` ile kendi sohbet kimliğinizi
 öğrenebilirsiniz. Grup kimliği seçilirse yetki o gruptaki komutlara verilir.
+Ek analiz kullanıcıları `BOT_DATA_DIR/authorized_chats.json` içindeki JSON
+sohbet kimliği listesiyle tanımlanır (yerelde varsayılan proje klasörü,
+Docker'da kalıcı `/data` klasörü). Bu dosya Git'e veya imaja eklenmez.
+Ek kullanıcılar hisse/kripto analizleri ve tarama komutlarını kullanabilir;
+portföy, performans, grafik ve model eğitimi yalnız `CHAT_ID` sahibine açıktır.
+Otomatik bildirimler mevcut `CHAT_ID` adresine gitmeye devam eder.
 
 ```powershell
 python bot.py
