@@ -192,7 +192,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  /hisse THYAO.IS →  Açıklamalı günlük hisse analizi\n"
         "  /hisse ASELS.IS →  Veri tarihi, göstergeler ve teknik seviyeler\n\n"
         "📰 <b>KAP ve Haber Gözlemleri</b>\n"
-        "  /haber ASELS → Resmi açıklama başlıkları ve özetleri\n"
+        "  /haber ASELS → KAP özetleri ve olası etki ön yorumu\n"
         "  /haberogren ASELS → Haber sonrası geçmiş fiyat davranışı\n"
         "  /kapdurum → Haber akışının durumu (bot sahibi)\n\n"
         "💰 <b>Temettü Komutları</b>\n"

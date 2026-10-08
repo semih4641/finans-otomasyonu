@@ -235,6 +235,7 @@ class AsyncNewsTests(unittest.IsolatedAsyncioTestCase):
              patch.object(handlers, "send_long_message", AsyncMock(side_effect=deliver)) as send:
             await service.scheduled_news_check(SimpleNamespace(bot=object()))
             self.assertEqual([call.args[1] for call in send.await_args_list], ["friend", "owner"])
+            self.assertTrue(all("Olası hisse etkisi" in call.args[2] for call in send.await_args_list))
             send.reset_mock()
             send.side_effect = None
             await service.scheduled_news_check(SimpleNamespace(bot=object()))

@@ -8,6 +8,7 @@ import logging
 from kap_news import NewsStore, current_time, news_enabled, refresh_news
 from news_learning import measure_event, price_frame
 from access_control import additional_chat_ids
+from news_impact import render_impact
 
 logger = logging.getLogger(__name__)
 _job_lock = asyncio.Lock()
@@ -88,6 +89,7 @@ async def scheduled_news_check(app):
                             f"{escape(row['title'])}\n{escape(row['summary'][:600])}\n"
                             f"Konu: {escape(row['category'])}\n"
                             f'<a href="https://www.kap.org.tr/tr/Bildirim/{row["id"]}">Resmi açıklama ve ekleri</a>\n'
+                            f"{render_impact(row)}\n"
                             "Bu bildirim AL/SAT önerisi değildir. Geçmiş gözlemler: /haberogren")
                     try:
                         await send_long_message(app.bot, chat_id, text)

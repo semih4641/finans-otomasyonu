@@ -306,6 +306,7 @@ async def refresh_news(tracked, *, store=None, now=None):
 
 
 def render_news(store, symbol=None):
+    from news_impact import render_impact
     state = store.state()
     lines = ["📰 <b>KAP açıklamaları</b>", "Kaynak: KAP herkese açık bildirim listesi · başlık ve resmi özet"]
     if not news_enabled():
@@ -324,6 +325,7 @@ def render_news(store, symbol=None):
                       f"{escape(row['title'])} · {escape(row['category'])}",
                       escape(row["summary"][:220]),
                       f'<a href="https://www.kap.org.tr/tr/Bildirim/{row["id"]}">KAP açıklamasını aç</a>'])
+        lines.append(render_impact(row))
         if row["amended"]:
             lines.append("Düzeltme/ilişkili açıklama; öğrenme istatistiğine alınmadı.")
     if not rows:

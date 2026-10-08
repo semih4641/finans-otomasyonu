@@ -52,7 +52,7 @@ komutları kullanılabilir; BIST modeli bu verilere uygulanmaz.
 | `/portfoy` | Sanal hesap ve pozisyon riskleri |
 | `/grafik` | Gerçekleşmiş parasal sonuçlarla hesap değeri ve düşüş grafiği |
 | `/mltrain quick`, `/mltrain` | Hızlı veya tam model eğitimi |
-| `/haber ASELS`, `/haber` | Hisseye özel veya genel son KAP açıklamaları |
+| `/haber ASELS`, `/haber` | Son KAP açıklamaları ve olası etki ön yorumu |
 | `/haberogren ASELS`, `/haberogren` | Haber kategorilerinin geçmiş fiyat gözlemleri |
 | `/kapdurum` | KAP veri ve ölçüm durumu (yalnız bot sahibi) |
 | `/izle`, `/help`, `/chatid` | İzleme listeleri ve yardım |
@@ -108,6 +108,26 @@ boşluğu görünür tutulur. Mevcut takip listesi seçilim yanlılığı taşı
 nedensellik, yatırım getirisi veya gelecekteki başarı kanıtı değildir. İşlem
 maliyeti/kayma ve yayın günündeki ilk fiyat tepkisi bu ölçümde yoktur.
 Bu özellik teknik AL/SAT sinyallerini ve mevcut ML modelini değiştirmez.
+
+### Olası hisse etkisi ön yorumu
+
+`/haber` yanıtlarında ve tüm yetkili alıcılara giden yeni KAP bildirimlerinde
+görünüm, gerekçe ve kontrol edilmesi gereken bilgiler gösterilir. Yorum
+`news_impact.py` içindeki kurallardan üretilir; LLM/duygu analizi, öğrenilmiş
+fiyat tahmini veya tam metin analizi değildir. Yeni iş ve geri alım için yalnız
+koşullu destek senaryosu anlatılır; kâr marjı, ciroya oran veya gerçekleşme
+bilinmiyorsa bunlar uydurulmaz. Finansal raporların rakamları okunmuş gibi yorum
+yapılmaz. Düzeltme, olumsuzluk/iptal ifadesi ve tanınmayan konularda yön belirsiz
+olarak bırakılır. Türkçe olumsuzluk kuralları kapsamlı bir dil çözümleyici değildir.
+
+Temettü ve bedelsiz işlemleri otomatik ek kazanç sayılmaz; devre kesici yön
+veya manipülasyon kanıtı olarak etiketlenmez. Temel mekanizmalar için
+[Investor.gov pay bölünmesi açıklaması](https://www.investor.gov/introduction-investing/investing-basics/glossary/stock-split),
+[temettü fiyat etkisi](https://www.investor.gov/introduction-investing/investing-basics/glossary/ex-dividend-dates-when-are-you-entitled-stock-and)
+ve [Borsa İstanbul devre kesici açıklaması](https://www.borsaistanbul.com/teknoloji/teknoloji-hizmetleri/risk-yonetimi/devre-kesici)
+referans alınmıştır. Yorumlar düşük bilgi kapsamlıdır: piyasa beklentileri,
+haber öncesi fiyatlama ve genel piyasa koşulları ölçülmez. Hedef fiyat, getiri
+yüzdesi veya yükseliş olasılığı üretilmez; işlem kuralları değiştirilmez.
 
 Kayıtlar `BOT_DATA_DIR/kap_news.sqlite3` dosyasında tutulur (yerelde varsayılan
 `backtest_out`, Docker'da kalıcı `/data`). Güncellemelerde korunur; yedeklere
