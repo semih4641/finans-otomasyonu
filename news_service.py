@@ -1,4 +1,4 @@
-"""Shared low-frequency KAP refresh, observation updates and owner alerts."""
+"""Shared low-frequency KAP refresh, observations and authorized-chat alerts."""
 import asyncio
 from collections import defaultdict
 from datetime import datetime
@@ -7,6 +7,7 @@ import logging
 
 from kap_news import NewsStore, current_time, news_enabled, refresh_news
 from news_learning import measure_event, price_frame
+from access_control import additional_chat_ids
 
 logger = logging.getLogger(__name__)
 _job_lock = asyncio.Lock()
@@ -75,18 +76,25 @@ async def scheduled_news_check(app):
         store, now = NewsStore(), current_time()
         try:
             await refresh_news(SCAN_STOCKS, store=store, now=now)
-            # Bound delivery per run. Ack one complete message at a time.
+            recipients = {str(CHAT_ID).strip()} | additional_chat_ids()
+            store.prepare_deliveries(recipients)
+            # Bound delivery per recipient. A failed chat cannot block others.
             # A crash between delivery and ack can duplicate that one message.
-            for row in store.latest(limit=10, pending=True):
-                published = datetime.fromisoformat(row["published_at"])
-                text = (f"📰 <b>YENİ KAP AÇIKLAMASI</b>\n"
-                        f"<b>{escape(row['symbols'])}</b> · {published:%d.%m.%Y %H:%M}\n"
-                        f"{escape(row['title'])}\n{escape(row['summary'][:600])}\n"
-                        f"Konu: {escape(row['category'])}\n"
-                        f'<a href="https://www.kap.org.tr/tr/Bildirim/{row["id"]}">Resmi açıklama ve ekleri</a>\n'
-                        "Bu bildirim AL/SAT önerisi değildir. Geçmiş gözlemler: /haberogren")
-                await send_long_message(app.bot, CHAT_ID, text)
-                store.acknowledge([row["id"]])
+            for chat_id in sorted(recipients):
+                for row in store.pending_deliveries(chat_id, limit=10):
+                    published = datetime.fromisoformat(row["published_at"])
+                    text = (f"📰 <b>YENİ KAP AÇIKLAMASI</b>\n"
+                            f"<b>{escape(row['symbols'])}</b> · {published:%d.%m.%Y %H:%M}\n"
+                            f"{escape(row['title'])}\n{escape(row['summary'][:600])}\n"
+                            f"Konu: {escape(row['category'])}\n"
+                            f'<a href="https://www.kap.org.tr/tr/Bildirim/{row["id"]}">Resmi açıklama ve ekleri</a>\n'
+                            "Bu bildirim AL/SAT önerisi değildir. Geçmiş gözlemler: /haberogren")
+                    try:
+                        await send_long_message(app.bot, chat_id, text)
+                    except Exception as exc:
+                        logger.warning("KAP alıcı gönderimi başarısız; tekrar denenecek: %s", type(exc).__name__)
+                        break
+                    store.acknowledge_delivery(row["id"], chat_id)
             await update_learning(store, now)
         except Exception as exc:
             logger.error("KAP takip döngüsü tamamlanamadı: %s", type(exc).__name__)

@@ -177,6 +177,9 @@ class AsyncNewsTests(unittest.IsolatedAsyncioTestCase):
         lock = patch.object(kap, "_refresh_lock", asyncio.Lock())
         lock.start()
         self.addCleanup(lock.stop)
+        recipients = patch.object(service, "additional_chat_ids", return_value=set())
+        recipients.start()
+        self.addCleanup(recipients.stop)
 
     async def test_official_request_uses_observed_date_format_and_no_redirects(self):
         def handle(request):
@@ -211,14 +214,44 @@ class AsyncNewsTests(unittest.IsolatedAsyncioTestCase):
              patch.object(service, "_job_lock", asyncio.Lock()), \
              patch.object(handlers, "send_long_message", AsyncMock(side_effect=RuntimeError("offline"))):
             await service.scheduled_news_check(app)
-        self.assertEqual(len(self.store.latest(pending=True)), 1)
+        self.assertEqual(len(self.store.pending_deliveries("test")), 1)
         with patch.object(bot, "CHAT_ID", "test"), patch.object(service, "NewsStore", return_value=self.store), \
              patch.object(service, "refresh_news", AsyncMock()), patch.object(service, "update_learning", AsyncMock()), \
              patch.object(service, "_job_lock", asyncio.Lock()), patch.object(handlers, "send_long_message", AsyncMock()) as send:
             await service.scheduled_news_check(app)
             await service.scheduled_news_check(app)
         self.assertEqual(send.await_count, 1)
-        self.assertFalse(self.store.latest(pending=True))
+        self.assertFalse(self.store.pending_deliveries("test"))
+
+    async def test_multiple_recipients_retry_independently_and_deduplicate_owner(self):
+        self.store.ingest(kap.parse_feed([payload()], ["ASELS.IS"], NOW), NOW)
+        async def deliver(target, chat, text):
+            if chat == "friend":
+                raise RuntimeError("blocked")
+        with patch.object(bot, "CHAT_ID", "owner"), patch.object(service, "NewsStore", return_value=self.store), \
+             patch.object(service, "additional_chat_ids", return_value={"owner", "friend"}), \
+             patch.object(service, "refresh_news", AsyncMock()), patch.object(service, "update_learning", AsyncMock()), \
+             patch.object(service, "_job_lock", asyncio.Lock()), \
+             patch.object(handlers, "send_long_message", AsyncMock(side_effect=deliver)) as send:
+            await service.scheduled_news_check(SimpleNamespace(bot=object()))
+            self.assertEqual([call.args[1] for call in send.await_args_list], ["friend", "owner"])
+            send.reset_mock()
+            send.side_effect = None
+            await service.scheduled_news_check(SimpleNamespace(bot=object()))
+            self.assertEqual([call.args[1] for call in send.await_args_list], ["friend"])
+        self.assertEqual(self.store.pending_delivery_count(), 0)
+
+    async def test_migration_seed_and_removed_recipient_do_not_replay_archive(self):
+        self.store.ingest(kap.parse_feed([payload()], ["ASELS.IS"], NOW), NOW, seed=True)
+        self.store.prepare_deliveries({"owner", "friend"})
+        self.assertEqual(self.store.pending_delivery_count(), 0)
+        self.store.ingest(kap.parse_feed([payload(11)], ["ASELS.IS"], NOW), NOW)
+        self.store.prepare_deliveries({"owner", "friend"})
+        self.assertEqual(self.store.pending_delivery_count(), 2)
+        self.store.acknowledge_delivery(11, "owner")
+        self.store.prepare_deliveries({"owner"})
+        self.store.prepare_deliveries({"owner", "friend", "new"})
+        self.assertEqual(self.store.pending_delivery_count(), 0)
 
     async def test_unauthorized_chat_cannot_fetch_news_or_status(self):
         update = SimpleNamespace(effective_chat=SimpleNamespace(id="unknown"))

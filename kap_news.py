@@ -150,6 +150,10 @@ class NewsStore:
                     horizon INTEGER NOT NULL, entry_day TEXT NOT NULL, exit_day TEXT NOT NULL,
                     raw_return REAL NOT NULL, benchmark_return REAL, measured_at TEXT NOT NULL,
                     PRIMARY KEY(news_id, symbol, horizon));
+                CREATE TABLE IF NOT EXISTS news_deliveries (
+                    news_id INTEGER REFERENCES news(id) ON DELETE CASCADE,
+                    chat_id TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(news_id, chat_id));
             """)
             yield db
             db.commit()
@@ -208,6 +212,37 @@ class NewsStore:
     def acknowledge(self, ids):
         with self.connect() as db:
             db.executemany("UPDATE news SET notified=1 WHERE id=?", [(i,) for i in ids])
+
+    def prepare_deliveries(self, recipients):
+        """Snapshot current recipients for new news; never replay the old archive."""
+        recipients = sorted({str(chat) for chat in recipients})
+        if not recipients:
+            return
+        with self.connect() as db:
+            placeholders = ",".join("?" for _ in recipients)
+            db.execute(f"DELETE FROM news_deliveries WHERE chat_id NOT IN ({placeholders})", recipients)
+            db.executemany("""INSERT OR IGNORE INTO news_deliveries(news_id,chat_id)
+                SELECT id,? FROM news WHERE notified=0""", [(chat,) for chat in recipients])
+            db.execute("UPDATE news SET notified=1 WHERE notified=0")
+
+    def pending_deliveries(self, chat_id, limit=10):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""
+                SELECT n.*,GROUP_CONCAT(s.symbol) AS symbols FROM news n
+                JOIN news_symbols s ON s.news_id=n.id
+                JOIN news_deliveries d ON d.news_id=n.id
+                WHERE d.chat_id=? AND d.delivered=0
+                GROUP BY n.id ORDER BY n.published_at,n.id LIMIT ?
+            """, (str(chat_id), limit))]
+
+    def acknowledge_delivery(self, news_id, chat_id):
+        with self.connect() as db:
+            db.execute("UPDATE news_deliveries SET delivered=1 WHERE news_id=? AND chat_id=?",
+                       (news_id, str(chat_id)))
+
+    def pending_delivery_count(self):
+        with self.connect() as db:
+            return db.execute("SELECT COUNT(*) FROM news_deliveries WHERE delivered=0").fetchone()[0]
 
     def learning_events(self):
         with self.connect() as db:

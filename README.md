@@ -26,7 +26,8 @@ sohbet kimliği listesiyle tanımlanır (yerelde varsayılan proje klasörü,
 Docker'da kalıcı `/data` klasörü). Bu dosya Git'e veya imaja eklenmez.
 Ek kullanıcılar hisse/kripto analizleri ve tarama komutlarını kullanabilir;
 portföy, performans, grafik ve model eğitimi yalnız `CHAT_ID` sahibine açıktır.
-Otomatik bildirimler mevcut `CHAT_ID` adresine gitmeye devam eder.
+KAP bildirimleri `CHAT_ID` ve ek yetkili sohbetlere gider; diğer otomatik
+bildirimler yalnız mevcut `CHAT_ID` adresine gitmeye devam eder.
 
 ```powershell
 python bot.py
@@ -71,8 +72,13 @@ Bu rapor şirket haberlerini ve finansal tabloları değerlendirmez.
 `KAP_ENABLED=true` (varsayılan) ile bot, KAP'ın herkese açık bildirim listesini
 30 dakikada bir kontrol eder. `SCAN_STOCKS` içindeki hisseler, bildirimin hisse
 ve ilgili hisse kodlarıyla tam eşleştirilir. İlk çalışmada son 7 takvim günü
-sessizce arşivlenir; sonraki yeni açıklamalar yalnız bot sahibine bildirilir.
-Bir döngüde en fazla 10 bildirim gönderilir; kalanlar sıradaki döngüye kalır.
+sessizce arşivlenir; sonraki yeni açıklamalar bot sahibine ve
+`authorized_chats.json` içindeki ek sohbetlere bildirilir. Alıcı listesi her
+döngüde yeniden okunur; yeni eklenen kişilere eski arşiv topluca gönderilmez.
+Her alıcıya bir döngüde en fazla 10 bildirim gönderilir; kalanlar sıradaki döngüye kalır.
+Teslim durumu alıcı bazında saklanır; bir alıcının hatası diğerlerini engellemez,
+başarılı alıcılara tekrar gönderilmez. Listeden çıkarılan alıcının kuyruğu silinir.
+Alıcının önce Telegram'da botu başlatması ve engellememiş olması gerekir.
 Başarısız gönderimler tekrar denenir; gönderim ile kayıt arasındaki ani kapanma
 tek bir bildirimin tekrarına yol açabilir. Ek yetkili kullanıcılar haber ve
 öğrenme komutlarını kullanabilir, otomatik haber alıcısını değiştiremez.

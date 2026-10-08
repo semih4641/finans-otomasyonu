@@ -120,7 +120,7 @@ async def kapdurum_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if key in {"last_success", "last_learning"}:
                 value = datetime.fromisoformat(value).strftime("%d.%m.%Y %H:%M (İstanbul)")
             lines.append(f"{label}: {escape(value)}")
-    lines.append(f"Gönderim bekleyen: {len(store.latest(limit=10000, pending=True))}")
+    lines.append(f"Alıcı bazında gönderim bekleyen: {store.pending_delivery_count()}")
     await send_long_message(update.effective_message, None, "\n".join(lines))
 
 
